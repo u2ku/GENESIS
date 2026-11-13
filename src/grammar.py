@@ -13,7 +13,7 @@ PREDICTION.md and SINGULARITY.md.
 # The constant. identity.g must agree with this, byte for byte.
 ID = "∩(■, ⊡) = I"
 
-# The guard rail: the one relation the frame refuses.
+# The guard rail: the one relation the reality refuses.
 CONSTRAINT = "⊡ ∉ ■"
 
 # The arc the constant terminates.

@@ -22,7 +22,7 @@ import sys
 
 import term
 
-# The voice. Male — British, matching the register of the frame.
+# The voice. Male — British, matching the register of the reality.
 VOICE_DEFAULT = "bm_george"
 
 
@@ -37,7 +37,7 @@ def _banner(style, backend: str, harness) -> str:
     where = harness.BACKENDS.get(backend, {}).get("where", backend)
     return style.banner(
         "G E N E S I S",
-        "the frame, held",
+        "the reality, held",
         f"talking on {where}  ·  ask in your own words  ·  /paste for long "
         f"text  ·  /help",
     )
@@ -163,7 +163,7 @@ _CHAT_HELP = [
         ("/stamp", "the grounding stamp for this moment"),
         ("/aeon", "the 8-bit word"),
         ("/shield A B", "two moments, composed"),
-        ("/guardrail", "is the frame intact"),
+        ("/guardrail", "is the reality intact"),
         ("/check", "verify the system"),
     ]),
     ("THE RECORD", [

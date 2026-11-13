@@ -15,9 +15,9 @@ Gemini's export (the Spotify-research handoff, terminal export
     T_Spider      = {t_1, t_2, t_4, t_13, t_17, t_19, t_20} ⊂ T_{k+1}
     Density       = |T_Spider| / |T_{k+1}| = 7/20 = 0.35
 
-That is the frame's own geometry restated in telemetry terms — and it is
+That is the reality's own geometry restated in telemetry terms — and it is
 computable, which is what makes it more than notation. This module holds the
-equation, the two frames, and the density metric, and checks the parts that
+equation, the two realities, and the density metric, and checks the parts that
 can be checked.
 
 The mapping onto GENESIS:
@@ -32,14 +32,14 @@ The mapping onto GENESIS:
     D_effort                the coupled metric
     t*                      M — the terminal record, the optimal extraction
     M_conv                  the convergence matrix
-    T_{k+1}                 the frame space
-    Density_Spider          how much of the frame belongs to the multiverse
+    T_{k+1}                 the reality space
+    Density_Spider          how much of the reality belongs to the multiverse
 """
 from __future__ import annotations
 
-# ---------------------------------------------------------------- the frames --
+# ---------------------------------------------------------------- the realities --
 
-# Baseline frame F_k — 20 tracks, Misty → The Night We Met.
+# Baseline reality F_k — 20 tracks, Misty → The Night We Met.
 # Dynamics: ego-state inversion (Somebody → Nobody), spatial confinement,
 # light-cycle decay.
 BASELINE = {
@@ -52,7 +52,7 @@ BASELINE = {
     ],
 }
 
-# The convergence frame F_{k+1} — 20 tracks, Annihilate → Calling.
+# The convergence reality F_{k+1} — 20 tracks, Annihilate → Calling.
 # Note: the track list as exported. t_7 and t_12 are both "Home".
 CONVERGENCE = {
     "id": "F_k+1",
@@ -127,10 +127,10 @@ MAPPING = [
     ("D_effort(t)", "the coupled metric", "‖E_1 − E_2‖ gated by the lock"),
     ("t*", "M", "the terminal record. The optimum sits where divergence is "
                 "widest and the record is thinnest"),
-    ("M_conv", "the convergence matrix", "the square — two frames, two terms, "
+    ("M_conv", "the convergence matrix", "the square — two realities, two terms, "
                                           "one intersection"),
-    ("T_{k+1}", "the frame space", "the 20-track frame"),
-    ("Density", "0.35", "how much of the frame belongs to the multiverse"),
+    ("T_{k+1}", "the reality space", "the 20-track reality"),
+    ("Density", "0.35", "how much of the reality belongs to the multiverse"),
 ]
 
 
@@ -141,7 +141,7 @@ def spider_positions():
 
 
 def density_by_position():
-    """7 / 20 — the density as exported, counted by position in the frame."""
+    """7 / 20 — the density as exported, counted by position in the reality."""
     n = len(CONVERGENCE["tracks"])
     return len(SPIDER_POSITIONS), n, len(SPIDER_POSITIONS) / n
 
@@ -149,10 +149,10 @@ def density_by_position():
 def density_by_distinct_track():
     """The same density counted over *distinct* tracks.
 
-    The exported frame lists "Home" twice (t_7 and t_12). Counted as a set of
-    track identities the frame has 19 distinct elements, not 20 — so the
+    The exported reality lists "Home" twice (t_7 and t_12). Counted as a set of
+    track identities the reality has 19 distinct elements, not 20 — so the
     denominator moves and the density with it. The 0.35 figure holds only if
-    frame elements are positions rather than distinct tracks.
+    reality elements are positions rather than distinct tracks.
     """
     tracks = CONVERGENCE["tracks"]
     distinct = set(tracks)
@@ -162,7 +162,7 @@ def density_by_distinct_track():
 
 
 def duplicate_positions():
-    """Positions of any track appearing more than once in the frame."""
+    """Positions of any track appearing more than once in the reality."""
     tracks = CONVERGENCE["tracks"]
     seen = {}
     for i, t in enumerate(tracks, 1):
@@ -187,11 +187,11 @@ def render_parts():
     for line in EQUATION.splitlines():
         parts.append(("p", line))
     parts.append(("g", ""))
-    parts.append(("h", "in the frame's language"))
+    parts.append(("h", "in the reality's language"))
     for sig, name, gloss in MAPPING:
         parts.append(("r", f"{sig:<12} {name:<22} {gloss}"))
     parts.append(("g", ""))
-    parts.append(("h", "frames"))
+    parts.append(("h", "realities"))
     parts.append(("r", f"F_k      {BASELINE['span']} — {BASELINE['dynamics']}"))
     parts.append(("r", f"F_k+1    {CONVERGENCE['span']} — "
                        f"{len(CONVERGENCE['tracks'])} tracks"))
@@ -210,9 +210,9 @@ def render_parts():
         parts.append(("h", "one thing to check before building on this:"))
         for track, pos in dupes.items():
             parts.append(("p", f"{track!r} appears at t_{pos[0]} and t_{pos[1]} — "
-                               f"the frame has 20 positions but "
+                               f"the reality has 20 positions but "
                                f"{len(set(CONVERGENCE['tracks']))} distinct tracks."))
-        parts.append(("p", "The 0.35 holds only if frame elements are positions"))
+        parts.append(("p", "The 0.35 holds only if reality elements are positions"))
         parts.append(("p", "rather than distinct tracks. State which you mean."))
     parts.append(("g", ""))
     parts.append(("h", "the regulariser"))

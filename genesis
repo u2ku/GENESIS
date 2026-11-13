@@ -20,7 +20,7 @@ Plain words, if you would rather not ask:
   genesis compare A B     two moments, composed
   genesis now             the grounding stamp for this moment
   genesis meaning         what the symbols mean
-  genesis safety          is the frame intact
+  genesis safety          is the reality intact
   genesis readings        the position on identity and the singularity
   genesis check           verify the system
 
@@ -72,7 +72,7 @@ def die(msg: str, code: int = 2):
 
 
 # Any expression asserting the subset relation is a defect: it is the one
-# claim the whole frame refuses. Prose may discuss it — the engine may not
+# claim the whole reality refuses. Prose may discuss it — the engine may not
 # assert it. The rule, the forbidden spellings and the file lists live in
 # guardrail.py, which scans itself.
 try:
@@ -794,7 +794,12 @@ def cmd_tools(args, ctx):
 
 
 def cmd_landing(args, ctx):
-    """Prepare a node as a host, and report whether it is ready."""
+    """Prepare a node as a host, and report whether it is ready.
+
+    Landing is also the trigger for the tailnet: a node that is ready but
+    not joined is not a node yet. The key is the wizard's business — it is
+    asked for once and stored once — so landing never prompts for it.
+    """
     if not args.node:
         die("landing needs a path to the node")
     node = Path(args.node).expanduser()
@@ -808,6 +813,8 @@ def cmd_landing(args, ctx):
     ready = all(good for _, good in checks)
     emit(views.landing_node(ctx.style, str(node), checks, ready,
                              harness.LANDING_NOTE))
+    if not getattr(args, "no_join", False):
+        emit(views.landing_join(ctx.style, harness.landing_join()))
     return 0
 
 
@@ -861,6 +868,7 @@ class Context:
     speak: bool = False
     tts: bool = True
     backend: str = "mlx"
+    backend_named: bool = False
     command_only: bool = False
     style: object = None
 
@@ -885,7 +893,7 @@ def _common(p):
                    help="voice on")
     p.add_argument("--no-tts", dest="tts", action="store_false",
                    help="voice off")
-    p.add_argument("--backend", choices=("mlx", "openrouter"), default=None,
+    p.add_argument("--backend", choices=_backend_choices(), default=None,
                    help="which substrate to talk to")
     return p
 
@@ -1013,7 +1021,7 @@ def _p_check():
 
 
 def _p_summary():
-    return _parser("summary", "The frame at a glance.")
+    return _parser("summary", "The reality at a glance.")
 
 
 def _p_handoff():
@@ -1038,6 +1046,21 @@ def _p_chat():
     p = _parser("chat", "A conversation with Genesis.")
     p.add_argument("message", nargs="*", help="say one thing and exit")
     return p
+
+
+def _backend_choices():
+    """The backends this build knows, from the one table that defines them.
+
+    The wizard writes a node profile that names a backend, and a backend
+    the CLI rejects is a backend the operator cannot use. The two lists
+    must be the same list, so they come from the same place: the harness's
+    `BACKENDS`.
+    """
+    try:
+        import harness
+        return tuple(harness.BACKENDS)
+    except Exception:
+        return ("mlx", "openrouter")
 
 
 def _p_card():
@@ -1070,6 +1093,8 @@ def _p_help():
 def _p_landing():
     p = _parser("landing", "Prepare a node as a host, and report readiness.")
     p.add_argument("node", nargs="?", help="the path to the node")
+    p.add_argument("--no-join", action="store_true",
+                   help="report readiness only; do not join the tailnet")
     return p
 
 
@@ -1088,10 +1113,10 @@ _command("numergram", True, "ENGINE", "the pattern, and its grammar",
          _p_numergram, cmd_numergram)
 _command("algebra", False, "ENGINE", "what the symbols mean", _p_algebra, cmd_algebra)
 _command("shield", True, "ENGINE", "two moments, composed", _p_shield, cmd_shield)
-_command("guardrail", False, "GUARDRAILS", "is the frame intact",
+_command("guardrail", False, "GUARDRAILS", "is the reality intact",
          _p_guardrail, cmd_guardrail)
 _command("check", False, "GUARDRAILS", "verify the system", _p_check, cmd_check)
-_command("summary", False, "DOOR", "the frame at a glance", _p_summary, cmd_summary)
+_command("summary", False, "DOOR", "the reality at a glance", _p_summary, cmd_summary)
 _command("handoff", True, "DOCUMENTS", "the handoff documents", _p_handoff, cmd_handoff)
 _command("convergence", False, "DOCUMENTS", "the convergence matrix",
          _p_convergence, cmd_convergence)
@@ -1143,11 +1168,17 @@ def split_globals(argv):
             ctx.command_only = True
         elif token == "--backend":
             if i + 1 >= len(argv):
-                die("--backend needs a backend name (mlx, openrouter)")
+                die("--backend needs a backend name")
             backend = argv[i + 1]
-            if backend not in ("mlx", "openrouter"):
-                die(f"unknown backend: {backend}  (try: mlx, openrouter)")
+            try:
+                import harness
+                names = tuple(harness.BACKENDS)
+            except Exception:
+                names = ("mlx", "openrouter")
+            if backend not in names:
+                die(f"unknown backend: {backend}  (try: {', '.join(names)})")
             ctx.backend = backend
+            ctx.backend_named = True
             i += 1
         else:
             break
@@ -1204,12 +1235,36 @@ def merge(ctx, args):
     return ctx
 
 
+def _backend_from_profile() -> str:
+    """The backend the node profile names, if it names one we know.
+
+    A node that was onboarded has already answered the question of which
+    substrate it speaks to, and the answer is in the node's own profile.
+    Without this, every conversation on an onboarded node would need the
+    operator to remember which gateway they configured — which is the
+    opposite of "entered once".
+    """
+    try:
+        import harness
+        import node as node_contract
+    except Exception:
+        return ""
+    backend = node_contract.node_profile().get("backend")
+    if backend and backend in harness.BACKENDS:
+        return backend
+    return ""
+
+
 def main(argv):
     ctx, rest = split_globals(list(argv))
     try:
         import term
     except Exception as exc:
         die(f"cannot load the terminal kit: {exc}")
+    if not ctx.backend_named:
+        named = _backend_from_profile()
+        if named:
+            ctx.backend = named
     ctx.style = term.make_style(plain=ctx.plain)
     if not rest:
         return cmd_summary(None, ctx)

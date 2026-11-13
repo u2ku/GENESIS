@@ -11,7 +11,7 @@ The chat prompt lives in two files.
 The card carries a marker, `<!-- genesis:grounding -->`, where the engine's
 three primary signs go. They are read from the engine at assembly time —
 the identity from `identity.g`, the guard rail and the arc from
-`grammar.py` — so the prompt cannot say one thing and the frame another.
+`grammar.py` — so the prompt cannot say one thing and the reality another.
 `genesis check` fails if the live prompt has fallen behind the engine.
 
 The card also feeds the tool list in `harness.py`. The two halves are the

@@ -85,7 +85,7 @@ PRIVATE_PATTERNS = (
     ("a user's home directory",
      re.compile(r"/Users/[A-Za-z0-9._-]+/")),
     ("a live api key",
-     re.compile(r"\b(?:sk-ant-|sk-or-|tskey-|ghp_|gho_)[A-Za-z0-9_-]{16,}")),
+     re.compile(r"\b(?:sk-ant-|sk-or-|sk-cp-|tskey-|ghp_|gho_)[A-Za-z0-9_-]{16,}")),
     ("a key in an assignment",
      re.compile(r"\b[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|TOKEN|PASSWORD)"
                 r"\s*=\s*[\"']?[A-Za-z0-9._-]{16,}")),

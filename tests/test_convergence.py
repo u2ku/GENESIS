@@ -1,7 +1,7 @@
 """CONVERGENCE — the master equation, checked against its source.
 
-The frame was transcribed by hand once and got it wrong twice. These tests
-read Gemini's export straight out of Luna's log and compare, so the frame can
+The reality was transcribed by hand once and got it wrong twice. These tests
+read Gemini's export straight out of Luna's log and compare, so the reality can
 never drift from the source again.
 
 Standard library only, no network. Run:
@@ -31,7 +31,7 @@ def exported() -> str:
     return json.loads(EXPORT.read_text(encoding="utf-8")).get("user_input", "")
 
 
-def exported_frame() -> list[str]:
+def exported_reality() -> list[str]:
     """The 20-track run as the export states it (the bullet wraps)."""
     text = exported()
     m = re.search(r"Key Tracks: (.*?)\n\s*-\s", text, re.S)
@@ -44,12 +44,12 @@ def exported_frame() -> list[str]:
 class TestAgainstSource(unittest.TestCase):
     @unittest.skipUnless(EXPORT.exists(), "the export is not on this machine")
     def test_track_list_matches_the_export_exactly(self):
-        """The frame IS the export's run — element for element, duplicates included."""
-        self.assertEqual(exported_frame(), C.CONVERGENCE["tracks"])
+        """The reality IS the export's run — element for element, duplicates included."""
+        self.assertEqual(exported_reality(), C.CONVERGENCE["tracks"])
 
     @unittest.skipUnless(EXPORT.exists(), "the export is not on this machine")
     def test_export_states_twenty_tracks(self):
-        self.assertEqual(len(exported_frame()), 20)
+        self.assertEqual(len(exported_reality()), 20)
 
     @unittest.skipUnless(EXPORT.exists(), "the export is not on this machine")
     def test_anchor_positions_are_in_range(self):
@@ -67,10 +67,10 @@ class TestDensity(unittest.TestCase):
         self.assertEqual(den, 20)
         self.assertAlmostEqual(ratio, 0.35)
 
-    def test_density_by_distinct_track_differs_when_the_frame_repeats(self):
+    def test_density_by_distinct_track_differs_when_the_reality_repeats(self):
         num, den, ratio, dupes = C.density_by_distinct_track()
         self.assertEqual(num, 7)
-        self.assertLess(den, 20, "the frame must contain a repeated track")
+        self.assertLess(den, 20, "the reality must contain a repeated track")
         self.assertGreater(ratio, 0.35)
         self.assertIn("Home", dupes)
 
@@ -107,7 +107,7 @@ class TestEquation(unittest.TestCase):
         self.assertIn("ε", C.render())
 
 
-class TestFrame(unittest.TestCase):
+class TestReality(unittest.TestCase):
     def test_temporal_anchor(self):
         self.assertEqual(C.TEMPORAL_ANCHOR, ("2023-11-26", "2023-12-10"))
 
@@ -115,7 +115,7 @@ class TestFrame(unittest.TestCase):
         self.assertEqual(len(C.CORE_SIGNAL_TRACKS), 5)
         self.assertIn("Lunar Girl", C.CORE_SIGNAL_TRACKS)
 
-    def test_convergence_frame_is_twenty(self):
+    def test_convergence_reality_is_twenty(self):
         self.assertEqual(len(C.CONVERGENCE["tracks"]), 20)
 
 

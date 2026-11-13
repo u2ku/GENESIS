@@ -40,7 +40,7 @@ class TestBudget(unittest.TestCase):
 
 
 class TestContent(unittest.TestCase):
-    def test_carries_the_frame(self):
+    def test_carries_the_reality(self):
         for term in ("Annihilate", "Calling", "F_{k+1}", "20-track"):
             self.assertIn(term, playlist.PROMPT)
 

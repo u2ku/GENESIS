@@ -58,11 +58,11 @@ def _wrap_block(style, text: str, indent: int = 4) -> list[str]:
 # ------------------------------------------------------------------ landing --
 
 def landing(style, blocks: dict) -> str:
-    """The frame at a glance — the page you land on."""
+    """The reality at a glance — the page you land on."""
     constant = blocks.get("id", "")
     width = style.width
     out = ["", "  " + style.paint(constant.center(width - 2), term.BOLD, term.ACCENT),
-           "  " + style.soft("GENESIS · the frame, held".center(width - 2)),
+           "  " + style.soft("GENESIS · the reality, held".center(width - 2)),
            style.rule(width), ""]
     out += _fields(style, [
         ("identity", constant),
@@ -88,7 +88,7 @@ _GROUPS = [
     ("THE DOOR", [
         ('genesis "<ask in your own words>"', "Genesis answers, and runs what he needs"),
         ("genesis chat", "a conversation"),
-        ("genesis summary", "the frame at a glance"),
+        ("genesis summary", "the reality at a glance"),
         ("genesis card", "Genesis's character card"),
         ("genesis prompt", "the chat prompt — editable, and live when written"),
         ("genesis tools", "what he can run"),
@@ -107,9 +107,10 @@ _GROUPS = [
         ("genesis resonance A B", "field agreement"),
         ("genesis shield A B", "two moments, composed"),
         ("genesis numergram", "the pattern, and its grammar"),
+        ("genesis landing NODE", "prepare a node, and join it to the tailnet"),
     ]),
     ("GUARDRAILS", [
-        ("genesis guardrail", "is the frame intact"),
+        ("genesis guardrail", "is the reality intact"),
         ("genesis check", "verify the system"),
     ]),
     ("DOCUMENTS", [
@@ -120,8 +121,8 @@ _GROUPS = [
 ]
 
 _PHRASES = [
-    ("show me", "the frame as it stands right now"),
-    ("enlighten me", "the frame, and why the intersection"),
+    ("show me", "the reality as it stands right now"),
+    ("enlighten me", "the reality, and why the intersection"),
     ("what is I", "the definition, grounded in the engine"),
     ("what's luna", "her position in the record"),
     ("the record", "the most recent entries"),
@@ -130,7 +131,7 @@ _PHRASES = [
 _FLAGS = [
     ("--plain", "no colour, no animation"),
     ("--tts / --no-tts", "voice on or off"),
-    ("--backend mlx|openrouter", "which substrate to talk to"),
+    ("--backend NAME", "which substrate: mlx, openrouter, anthropic, minimax, openai"),
     ("--speak", "speak the reply"),
     ("--card", "Genesis's character card"),
     ("--tools", "what he can run"),
@@ -459,6 +460,18 @@ def landing_node(style, path: str, checks, ready: bool, note: str) -> str:
     out.append("")
     out.append("  " + style.paint("note to pass to Luna", term.BOLD, term.BRIGHT))
     out += _wrap_block(style, note)
+    return "\n".join(out)
+
+
+def landing_join(style, rows) -> str:
+    """The tailnet — the connective layer, and what the join actually did.
+
+    A step that needs a human is marked with a middot rather than a cross:
+    it is not a failure, it is a hand-off.
+    """
+    out = [style.heading("TAILNET", "the connective layer"), ""]
+    for label, mark, detail in rows:
+        out.append(_row(style, mark, label, detail, 22))
     return "\n".join(out)
 
 

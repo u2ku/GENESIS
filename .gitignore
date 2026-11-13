@@ -235,6 +235,10 @@ __pycache__/
 *.local
 !.env.example
 
+# The bootstrap's receipt — machine-local state, written by --dry-run.
+# It holds hashes and counts, never a value, and it is never published.
+.genesis-bootstrap/
+
 # Local model wrappers — not published (Zac's call, 2026-11-13)
 bin/
 

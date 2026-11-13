@@ -1,4 +1,4 @@
-"""GUARDRAIL — the one relation the frame refuses.
+"""GUARDRAIL — the one relation the reality refuses.
 
 The engine may never assert that the construct is a subset of the singularity.
 This module owns that rule: what the forbidden assertion looks like, which

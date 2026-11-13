@@ -103,21 +103,35 @@ New files are marked NEW. Nothing else in the tree moves.
 
 ```
 GENESIS/
-├── setup.sh                       NEW  the bootstrap entry point — bash, no dependencies
+├── setup.sh                       the bootstrap entry point — bash, no dependencies
 ├── tools/
-│   ├── bootstrap.py               NEW  detect / plan / apply — standard library only
-│   ├── node_daemon.py             NEW  the user-level keep-alive (§6.5)
-│   └── receipt.py                 NEW  the receipt writer and plan-hash (§5.3)
+│   ├── bootstrap.py               detect / plan / apply — standard library only
+│   ├── node_daemon.py             the user-level keep-alive (§6.5)
+│   ├── receipt.py                 the receipt writer and plan-hash (§5.3)
+│   ├── keydetect.py               NEW  which provider a key belongs to (§5.6 of WIZARD.md)
+│   └── spine_export.py            NEW  the deliberate, one-way push
 ├── src/
-│   ├── tcsi.py                    NEW  the vendored TCSI fallback (§8.3) — Phase A
-│   └── visibility.py              NEW  the write-time visibility contract — Phase A
+│   ├── tcsi.py                    the vendored TCSI fallback (§8.3) — Phase A
+│   ├── visibility.py              the write-time visibility contract — Phase A
+│   └── node.py                    NEW  the node contract — join, heartbeat, export
 ├── docs/
-│   └── PORTABILITY.md             this document
+│   ├── PORTABILITY.md             this document
+│   └── NODE-CONTRACT.md           NEW  the node contract, as built
 └── tests/
-    ├── test_bootstrap.py          NEW  the ladder, idempotency, refusal, redaction
-    ├── test_contract.py           NEW  help ↔ README ↔ tree agreement
-    └── test_visibility.py         NEW  nothing private reaches a public path
+    ├── test_bootstrap.py          the ladder, idempotency, refusal, redaction
+    ├── test_contract.py           help ↔ README ↔ tree agreement
+    ├── test_visibility.py         nothing private reaches a public path
+    ├── test_keydetect.py          NEW  the format table, the probe, the mask
+    └── test_node.py               NEW  the heartbeat, the join, the export
 ```
+
+**What is built, as of this writing.** `setup.sh` and `tools/bootstrap.py`
+implement the three rungs; `--wizard` is a mode on them, and
+`tools/keydetect.py` is the provider detection. The ladder's tests are
+`tests/test_bootstrap.py`, `tests/test_keydetect.py` and
+`tests/test_node.py`. What is *not* built is anything that needs a machine
+that was not switched on to be tested: the tailnet join has been exercised
+against a stub, not against a tailnet.
 
 **Discipline carried over from `genesis` itself:** `tools/bootstrap.py` imports
 nothing outside the standard library, and reads `.env` for credentials the way
@@ -332,7 +346,7 @@ no absolute home path enters it.
 | `--repo DIR` | the GENESIS checkout to prepare. Default: the repo containing `setup.sh`. |
 | `--node NAME` | the node's name on the mesh. Default: the hostname. |
 | `--no-daemon` | skip the node daemon even in the aggressive tier. |
-| `--no-tailscale` | skip Tailscale even in the aggressive tier. |
+| `--no-tailscale` | skip the tailnet step entirely: Tailscale is not installed and the node is not asked for an auth key. |
 | `--api-base-url URL` | the Claude Code substrate base URL — **everything before `/v1/messages`**. A path prefix is allowed; a trailing `/v1` is not, because Claude Code appends the path itself. A URL still containing `<` is refused: a placeholder must never reach disk. |
 | `--api-token-env VAR` | the environment variable holding the gateway credential. Read, never written. Default `ANTHROPIC_AUTH_TOKEN`. |
 | `--api-key-helper CMD` | a command whose stdout is the credential — the documented way to keep a key out of a file (§9.3). |
@@ -340,6 +354,17 @@ no absolute home path enters it.
 | `--no-probe` | skip the `/v1/messages` reachability probe. Off by default; the probe is what stops the plan writing config for an endpoint Claude Code cannot talk to. |
 | `--yes` | do not prompt for confirmation. **Does not** waive the receipt requirement. |
 | `--force-own PATH` | take ownership of a file the manifest does not already own, so the plan may write it. Repeatable. |
+| `--wizard` | run the wizard: detect, prompt once, verify, plan. A **mode**, not a tier — it composes with `--dry-run` and `--apply` |
+| `--provider NAME` | override the provider the key is routed to: `anthropic`, `openai`, `openrouter`, `minimax`. The override wins over the key's format; the probe still decides |
+| `--gateway-url URL` | the gateway base, when it is not one of the known providers. Never a placeholder — a URL containing `<` is refused |
+| `--model ID` | the model id the gateway serves. Overrides the provider's default |
+| `--key-file PATH` | read the key from a file instead of prompting. The **path** is a path; the value never appears in the process table |
+| `--keep-key` | keep the key already configured: the wizard does not prompt, does not write a new credential, and carries the value the **manifest already records** (by fingerprint) into the plan unchanged. It may still re-verify that value against the gateway — a key that no longer works is not a key to keep. |
+| `--codexify DIR` | the Codexify installation to configure. Default: detected |
+| `--no-codexify` | skip the Codexify target (it becomes a manual step) |
+| `--no-claude` | skip the Claude Code target |
+| `--no-start` | write the service files but do not start them. The unit and the LaunchAgent are written either way; this only says whether they are enabled |
+| `--tailnet-auth-key-file PATH` | the tailnet auth key's file. Default: `~/.config/luna-node/auth.key`, mode 0600. The **path** is what is passed to `tailscale` (`--auth-key=file:`), never the value |
 | `--help` | the help text. Rendered from the flag table (§8.1). |
 
 ### 5.5 Exit codes
@@ -356,6 +381,8 @@ These are part of the contract and are covered by the tests.
 | 5 | missing prerequisite — no `python3`, or `python3` too old |
 | 6 | conflict — the plan would overwrite a file it does not own; see §6.2 |
 | 7 | unsupported substrate — the gateway does not speak Anthropic Messages (§7.3) |
+| 8 | the key did not authenticate — the wizard's refusal. Nothing was written; see `docs/WIZARD.md` §7 |
+| 9 | the wizard's own precondition failed — no TTY for the prompt, or the credential file is not writable |
 
 ---
 
@@ -450,6 +477,12 @@ Bruce plays in Luna's spine, and deciding whether a portable node should
 carry it is §13 question 4, not something this spec settles. The daemon runs
 as a **user** unit (`systemd --user` on Linux, a `LaunchAgent` on macOS), never
 a system one, so it needs no `sudo` and survives `omarchy-update`.
+
+**What it emits.** A heartbeat, on an interval, into the node-local record:
+node id, hostname, OS, uptime, service states, and a monotonic sequence
+number. No credentials, no environment dump, no user file contents. The
+heartbeat is the node's only claim to liveness — a silent node is a dead
+node. The full contract is `docs/NODE-CONTRACT.md`.
 
 ### 6.6 The readiness probe, and honest reporting
 
