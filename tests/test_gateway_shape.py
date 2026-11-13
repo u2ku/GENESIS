@@ -344,3 +344,129 @@ class TestTheConvergenceCount(ShapeCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheWrittenSettings(ShapeCase):
+    """The settings the wizard WRITES — through the real path.
+
+    The tests above call `_claude_settings_content(ctx)` with a context this
+    file built by hand. That is a real weakness, and 500 named it: **a test
+    that builds the context it is testing cannot catch a defect in how the
+    context is BUILT.** If the wizard's real path reached the settings
+    writer with a different context than this file assembles, every test
+    above would still pass while the tool wrote the wrong thing.
+
+    So these drive the wizard itself — the same `bootstrap.main` the
+    `setup.sh` wrapper execs — against a local fake gateway, and read the
+    `settings.json` that actually lands on disk.
+
+    The hermetic stubs matter here: the plan installs the Claude Code CLI
+    when it is absent, and a test that reaches the apply path must never
+    run the real installer.
+    """
+
+    def _fake_gateway(self, shape):
+        """A gateway on an ephemeral port that speaks ONE of the two shapes."""
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("content-length") or 0)
+                self.rfile.read(length)
+                if self.path.endswith("/chat/completions"):
+                    if shape == "openai":
+                        body = json.dumps({"choices": [{"message": {
+                            "role": "assistant", "content": "pong"}}]}).encode()
+                        status = 200
+                    else:
+                        body = b"{}"
+                        status = 404
+                else:
+                    if shape == "anthropic":
+                        body = json.dumps({"type": "message", "content": [
+                            {"type": "text", "text": "pong"}]}).encode()
+                        status = 200
+                    else:
+                        body = b"{}"
+                        status = 404
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def _run_wizard(self, gateway_url):
+        """The wizard, dry-run then apply, and the settings it wrote."""
+        import contextlib
+        import io
+
+        import hermetic
+
+        stub = Path(self.home) / "stub-bin"
+        stub.mkdir(parents=True, exist_ok=True)
+        previous = hermetic.stub_cli_on_path(stub)
+        self.addCleanup(hermetic.restore_path, previous)
+        keyfile = Path(self.home) / "key"
+        keyfile.write_text("sk-test-shape-key-value\n", encoding="utf-8")
+        keyfile.chmod(0o600)
+        codes = {}
+        for rung in ("--dry-run", "--apply"):
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = bootstrap.main([
+                    "--repo", str(self.repo),
+                    "--wizard", rung,
+                    "--key-file", str(keyfile),
+                    "--gateway-url", gateway_url,
+                    "--no-codexify", "--no-tailscale",
+                ])
+            codes[rung] = (code, buffer.getvalue())
+        self.assertEqual(codes["--dry-run"][0], 0, codes["--dry-run"][1])
+        settings = Path(self.home) / ".claude" / "settings.json"
+        self.assertTrue(settings.exists(),
+                        "the wizard wrote no settings.json")
+        return (json.loads(settings.read_text(encoding="utf-8")),
+                codes["--apply"])
+
+    def test_the_openai_shape_writes_the_shim_as_the_base_url(self):
+        """The fix, through the real path: the SHIM, not the provider."""
+        settings, (code, out) = self._run_wizard(self._fake_gateway("openai"))
+        base = settings.get("env", {}).get("ANTHROPIC_BASE_URL")
+        self.assertEqual(base, "http://127.0.0.1:8790",
+                         f"the settings name {base!r}, not the shim")
+        # The apply exits 1, and it should: the shim is a user service that
+        # is not running in a unit test, so the readiness row for it FAILS
+        # and the wizard says so. A wizard that exited 0 with a consumer
+        # that did not answer would be the false success this whole lane
+        # exists to kill - so the honest exit is part of what is asserted.
+        self.assertEqual(code, 1, out)
+        self.assertIn("the shim did not answer", out)
+
+    def test_the_anthropic_shape_writes_the_gateway_as_the_base_url(self):
+        """The control: the same path, the other shape, the gateway."""
+        url = self._fake_gateway("anthropic")
+        settings, (code, out) = self._run_wizard(url)
+        self.assertEqual(settings.get("env", {}).get("ANTHROPIC_BASE_URL"),
+                         url)
+        # No shim on this shape, so no shim row can fail, and nothing else
+        # did: the apply is clean.
+        self.assertEqual(code, 0, out)
+
+    def test_the_written_settings_name_a_key_the_helper_can_read(self):
+        """And the credential is where the helper will find it."""
+        self._run_wizard(self._fake_gateway("openai"))
+        env_file = Path(self.repo) / ".env"
+        self.assertTrue(env_file.exists(), "the wizard wrote no .env")
+        self.assertIn("API_KEY=", env_file.read_text(encoding="utf-8"))
+        helper = Path(self.home) / ".config" / "genesis" / "bin"
+        self.assertTrue(helper.is_dir(), "the wizard wrote no helper")

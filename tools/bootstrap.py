@@ -1285,10 +1285,36 @@ def _enable_daemon(unit: str) -> tuple:
     """Start the heartbeat daemon as a *user* service. Never a system one."""
     unit_path = Path(unit)
     if unit_path.suffix == ".plist":
+        label = unit_path.stem
+        domain = f"gui/{os.getuid()}/{label}"
+        # A job with this label may already be registered — from an earlier
+        # onboarding, or from a test that installed one. `launchctl load`
+        # on a taken label prints "Load failed" and RETURNS 0, so the old
+        # job would keep the label and the plist we just wrote would be
+        # ignored: the wizard would report a service it never started.
+        # So take the label first, and then CHECK that the job now
+        # registered is the file we wrote.
+        subprocess.run(["launchctl", "bootout", domain],
+                       capture_output=True, text=True, timeout=60)
+        # The bootout is ASYNCHRONOUS: launchd releases the label a moment
+        # later, and a load issued in that window still finds it taken. So
+        # wait for the label to actually be free before loading into it.
+        for _ in range(40):
+            if subprocess.run(["launchctl", "print", domain],
+                              capture_output=True, text=True,
+                              timeout=60).returncode != 0:
+                break
+            time.sleep(0.25)
         result = subprocess.run(["launchctl", "load", "-w", str(unit_path)],
                                 capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            return False, (result.stderr or "").strip()[:200]
+        stderr = (result.stderr or "").strip()
+        if result.returncode != 0 or "Load failed" in stderr:
+            return False, stderr[:200]
+        registered = subprocess.run(["launchctl", "print", domain],
+                                    capture_output=True, text=True, timeout=60)
+        if str(unit_path.resolve()) not in (registered.stdout or ""):
+            return False, (f"{label} did not take: it is registered from "
+                           f"somewhere else")
         return True, "loaded"
     result = subprocess.run(["systemctl", "--user", "enable", "--now",
                              unit_path.name],
@@ -1381,6 +1407,11 @@ def _custom_candidates(url: str, env_var: str, model: Optional[str]):
     openai_base = base
     if base.endswith("/v1"):
         base = base[:-3]
+    # The guess is a PROBE, not a promise. It is what the wizard asks
+    # with; it is written into the settings only if the gateway actually
+    # served it (the model is taken from the winning endpoint, below).
+    # A gateway that does not serve it says so — and that answer is about
+    # the MODEL, not the key, which is why it is read that way.
     models = (model,) if model else ("gpt-4.1-mini",)
     return (
         keydetect.Endpoint("custom", keydetect.ANTHROPIC, base, env_var,
@@ -1430,6 +1461,33 @@ def verify_key(ctx, key: str) -> keydetect.ProbeResult:
     if winner is None:
         last = results[-1] if results else None
         status = last.status if last else None
+        detail = (last.detail if last else "") or ""
+        # A MODEL error is not a KEY error.
+        #
+        # The gateway answered 400 "model not found" — it never got as far
+        # as judging the credential — and saying "the key did not
+        # authenticate" blames the key for the model's sake, on a key
+        # that was perfectly good. (WIZARD.md 5.3 is the rule: a 401 means
+        # the key is wrong; a 400 about the model does not.)
+        if status == 400 and "model" in detail.lower():
+            raise Refusal(
+                "the gateway does not serve the model the wizard asked for. "
+                "Nothing was written.\n"
+                f"  it answered {status}: {detail}\n"
+                "  this is NOT the key: the gateway never got as far as "
+                "judging it.\n"
+                "  pass the ID your gateway SERVES:  --model ID",
+                EXIT_USAGE)
+        # A missing ROUTE is not a refused key either: the route is not
+        # there, and that is a different failure with a different fix.
+        if status == 404:
+            raise Refusal(
+                "the gateway does not serve that route. Nothing was "
+                "written.\n"
+                f"  it answered {status}"
+                + (f" at {last.endpoint.url}\n" if last else "\n")
+                + "  a 404 is a missing route, not a refused key.",
+                EXIT_UNSUPPORTED_SUBSTRATE)
         raise Refusal(
             "the key did not authenticate. Nothing was written.\n"
             f"  the endpoint that refused it answered "

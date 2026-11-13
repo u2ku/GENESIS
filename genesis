@@ -839,6 +839,10 @@ def cmd_ask(argv, ctx):
         import chat as chat_module
     except Exception as exc:
         die(f"cannot load the chat: {exc}")
+    note = profile_substrate_note(ctx)
+    if note:
+        print(note, file=sys.stderr)
+        return 1
     return chat_module.ask(ask, backend=ctx.backend,
                             tts=ctx.speak and ctx.tts, plain=ctx.plain)
 
@@ -850,6 +854,10 @@ def cmd_chat(args, ctx):
         import chat as chat_module
     except Exception as exc:
         die(f"cannot load the chat: {exc}")
+    note = profile_substrate_note(ctx)
+    if note:
+        print(note, file=sys.stderr)
+        return 1
     backend = ctx.backend
     message = " ".join(args.message).strip() if args.message else ""
     if message and message in ("mlx", "openrouter"):
@@ -1232,6 +1240,13 @@ def merge(ctx, args):
     backend = getattr(args, "backend", None)
     if backend:
         ctx.backend = backend
+        # The operator named a substrate, so the profile's substrate does
+        # not get to overrule it. Without this, `genesis chat --backend X`
+        # is REFUSED for a substrate the operator explicitly chose — the
+        # refusal fires against the one person it should never fire
+        # against, and `profile_substrate_note` contradicts its own
+        # docstring ("the operator named a backend themselves").
+        ctx.backend_named = True
     return ctx
 
 
@@ -1253,6 +1268,52 @@ def _backend_from_profile() -> str:
     if backend and backend in harness.BACKENDS:
         return backend
     return ""
+
+
+def profile_substrate_note(ctx) -> str:
+    """What the node profile says about the substrate, when it is a problem.
+
+    A profile can name a backend this build **cannot speak** — a custom
+    gateway, for instance, which the harness has no entry for. The CLI's
+    default is the local substrate, which answers **without a credential**
+    and carries the card as its system prompt, so a substitution there
+    produces a conversation that looks entirely normal while the traffic
+    goes somewhere the operator never configured.
+
+    This project's own rule is that nothing is claimed that was not
+    proved: a row that cannot be proved is a row that failed, or a row
+    that says it does not apply — never a row that says ✓ because the
+    plan intended it (`docs/PORTABILITY.md` §6.6, `docs/WIZARD.md` §3.7).
+
+    So this is the **middot** — it does not apply here, and it needs a
+    human. Not a warning that precedes a normal-looking answer: that is
+    the false success one level up, and a loud warning in front of a
+    success is still a success.
+
+    An empty string means there is nothing to say: the operator named a
+    backend themselves, or the profile names one this build knows.
+    """
+    if getattr(ctx, "backend_named", False):
+        return ""          # the operator chose; that is their business
+    try:
+        import harness
+        import node as node_contract
+    except Exception:
+        return ""
+    try:
+        backend = node_contract.node_profile().get("backend")
+    except Exception:
+        return ""
+    if not backend or backend in harness.BACKENDS:
+        return ""
+    return (
+        f"· this node's substrate is the {backend!r} gateway, and this "
+        f"build's harness has no backend for it.\n"
+        f"  I will not answer from a substrate you did not choose: the local "
+        f"default answers without a credential, so the reply would look "
+        f"normal and the traffic would not go where the node was pointed.\n"
+        f"  pass --backend to choose a substrate this build can speak."
+    )
 
 
 def main(argv):
