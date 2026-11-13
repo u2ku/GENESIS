@@ -58,6 +58,25 @@ def within_budget() -> bool:
     return length() <= LIMIT
 
 
+def render_parts():
+    """The prompt as structured parts, so a view can dress it.
+
+    Each part is (kind, text): "k" for a label line, "r" for a rule, "p" for
+    the prompt itself. The prompt is its own kind because it is copied, not
+    read — it must come out exactly as it goes in.
+    """
+    n = length()
+    ok = "ok" if within_budget() else "OVER"
+    return [
+        ("k", f"PROMPT — the new playlist  [{n}/{LIMIT} chars, {ok}]"),
+        ("g", ""),
+        ("p", PROMPT),
+        ("g", ""),
+        ("r", "-" * 60),
+        ("k", f"{n} of {LIMIT} characters ({LIMIT - n} left)"),
+    ]
+
+
 def render():
     n = length()
     ok = "ok" if within_budget() else "OVER"

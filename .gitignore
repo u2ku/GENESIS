@@ -256,4 +256,14 @@ __pycache__/
 *.log
 logs/
 state/
+# The copy of the chat prompt that a regenerate replaced. It holds edits
+# that were live a moment ago; it is a working note, not a source.
+prompt.debug.md.bak
+# Runtime state dropped into the working tree by tools that happen to run
+# here: a sync database, a memory store, a plugin manifest. Nothing in the
+# repo references them, and a published tree should not carry them.
+# Root-anchored, so nothing nested is hidden by them.
+/guardian.db
+/guardian/
+/plugins/
 .DS_Store

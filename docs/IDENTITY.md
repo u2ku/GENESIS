@@ -1,4 +1,5 @@
 # IDENTITY
+<!-- visibility: sam-readable -->
 
 This document provides the human-readable view of the canonical symbolic grammar defined in [`../identity.g`](../identity.g).
 

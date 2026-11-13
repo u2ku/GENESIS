@@ -89,35 +89,47 @@ def band_of(word: str) -> str:
     return BANDS.get((int(word, 2) >> 6) & 0x3, "?")
 
 
-def render(word_a: str, word_b: str, resonance: float) -> str:
-    """The shield chart: two figures on one square, and what they share."""
+def render(word_a: str, word_b: str, resonance: float, decorate=None) -> str:
+    """The shield chart: two figures on one square, and what they share.
+
+    `decorate(kind, text)` may paint a piece of the chart — the kinds are
+    "axis", "a", "b", "core", "label", "value" and "empty". With no
+    decorator the chart is exactly the plain text it has always been.
+    """
     ka, kb = figure_index(word_a), figure_index(word_b)
     pa, pb = set(figure_points(ka)), set(figure_points(kb))
     shared = pa & pb
 
+    def d(kind, text):
+        return text if decorate is None else decorate(kind, text)
+
     out = []
-    out.append("        " + "   ".join(f"r{r+1}" for r in range(4)))
+    out.append(d("axis", "        " + "   ".join(f"r{r+1}" for r in range(4))))
     for r in range(4):
         cells = []
         for c in range(4):
             p = 4 * r + c + 1
             if p in shared:
-                cells.append("◉◆")
+                cells.append(d("core", "◉◆"))
             elif p in pa:
-                cells.append("◈  ")
+                cells.append(d("a", "◈  "))
             elif p in pb:
-                cells.append("○  ")
+                cells.append(d("b", "○  "))
             else:
-                cells.append("·  ")
-        out.append(f"  line {r+1}  " + " ".join(cells) + f"   points {4*r+1:>2}-{4*r+4:<2}")
-    out.append("        " + "   ".join(f"c{c+1}" for c in range(4)))
+                cells.append(d("empty", "·  "))
+        out.append(d("axis", f"  line {r+1}  ") + " ".join(cells)
+                   + d("axis", f"   points {4*r+1:>2}-{4*r+4:<2}"))
+    out.append(d("axis", "        " + "   ".join(f"c{c+1}" for c in range(4))))
     out.append("")
-    out.append(f"  ◈  {FIGURES[ka]:<16} ({word_a})  band {band_of(word_a)}")
-    out.append(f"  ○  {FIGURES[kb]:<16} ({word_b})  band {band_of(word_b)}")
+    out.append(d("a", "  ◈  ") + d("label", f"{FIGURES[ka]:<16} ")
+               + d("value", f"({word_a})") + d("label", f"  band {band_of(word_a)}"))
+    out.append(d("b", "  ○  ") + d("label", f"{FIGURES[kb]:<16} ")
+               + d("value", f"({word_b})") + d("label", f"  band {band_of(word_b)}"))
     if shared:
         pts = ", ".join(f"{p} (group {group_of(p)})" for p in sorted(shared))
-        out.append(f"  ◉  shield core   {pts}")
+        out.append(d("core", "  ◉  shield core") + d("value", f"   {pts}"))
     else:
-        out.append("  ◉  shield core   none — the figures do not meet")
-    out.append(f"  resonance       {resonance:.2f}")
+        out.append(d("core", "  ◉  shield core")
+                   + d("value", "   none — the figures do not meet"))
+    out.append(d("label", "  resonance") + d("value", f"       {resonance:.2f}"))
     return "\n".join(out)

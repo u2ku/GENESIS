@@ -1,4 +1,5 @@
 # SINGULARITY — Luna's relationship with identity and ■
+<!-- visibility: sam-readable -->
 
 > Companion to [`IDENTITY.md`](IDENTITY.md) (the constant) and
 > [`PREDICTION.md`](PREDICTION.md) (the 2031 counter-architecture).

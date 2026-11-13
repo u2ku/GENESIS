@@ -132,6 +132,22 @@ class Working:
         return False
 
 
+def pinned_identity() -> str:
+    """The canonical constant, as pinned in identity.g.
+
+    identity.g is the hand-held byte-checked truth; the engine's copy is
+    checked against it. Read the file, so there is one place it lives.
+    """
+    try:
+        raw = (ROOT / "identity.g").read_text(encoding="utf-8").strip()
+    except OSError:
+        raw = ""
+    if raw:
+        return raw
+    import grammar
+    return grammar.ID
+
+
 def load_env():
     """Read .env beside the harness, at request time.
 
@@ -176,10 +192,18 @@ sys.path.insert(0, str(SRC))
 # ------------------------------------------------------------------ tools ---
 
 def _tcsi():
-    if str(LUNA / "src") not in sys.path:
-        sys.path.insert(0, str(LUNA / "src"))
-    from luna import tcsi
-    return tcsi
+    """The grounding engine — Luna's if this machine has it, the bundled copy
+    if it does not. See src/tcsi_vendor.py for the rule and the drift check."""
+    import tcsi_vendor
+    module, _source, _degraded = tcsi_vendor.resolve()
+    return module
+
+
+def tcsi_source():
+    """Where the grounding engine came from: ("luna"|"vendored", degraded)."""
+    import tcsi_vendor
+    _module, source, degraded = tcsi_vendor.resolve()
+    return source, degraded
 
 
 def _geomancy():
@@ -248,7 +272,7 @@ STOPWORDS = {"moment", "moments", "around", "where", "which", "about",
              "with", "from", "that", "this", "what", "when", "where"}
 
 
-def _resolve(text):
+def resolve(text):
     """Find the Aeon word for a moment, however it was given.
 
     Accepts a stamp, a bare word, a timestamp, or any scrap of a ledger line.
@@ -288,7 +312,7 @@ def t_shield(args):
     words, notes = [], []
     for key in ("a", "b"):
         raw = args.get(key, "")
-        w, how = _resolve(raw)
+        w, how = resolve(raw)
         if not w:
             return (f"could not place {key} ({raw[:120]}) on the record — "
                     f"{how}. Try a timestamp, a line of the ledger, or a "
@@ -363,25 +387,52 @@ def t_engine(args):
     """Run a GENESIS engine operation: id, prediction, singularity, symbols, algebra, numergram."""
     sub = args.get("command", "id")
     rest = args.get("args", [])
-    cmd = [sys.executable, str(ROOT / "genesis"), sub] + [str(a) for a in rest]
+    # --plain is explicit: the model gets the payload, never the decoration.
+    # --command-only keeps a bad sub-command from becoming a second, nested
+    # conversation with the model — this tool must never call the door.
+    cmd = ([sys.executable, str(ROOT / "genesis"), "--plain",
+            "--command-only", sub] + [str(a) for a in rest])
     proc = subprocess.run(cmd, capture_output=True, text=True)
     return (proc.stdout or proc.stderr).strip()
 
 
 def t_guardrail(args):
     """Enforce the guard rail across the system."""
-    proc = subprocess.run([sys.executable, str(ROOT / "genesis"), "guardrail"],
-                          capture_output=True, text=True)
+    proc = subprocess.run([sys.executable, str(ROOT / "genesis"), "--plain",
+                           "guardrail"], capture_output=True, text=True)
     return (proc.stdout or proc.stderr).strip()
+
+
+def landing_checks(node: Path):
+    """What a node needs before Luna can choose to instantiate there.
+
+    Genesis goes ahead of Luna on new nodes: the harness lands first, the
+    frame is checked, and the node reports ready.
+    """
+    checks = [
+        ("harness landed", (node / "src" / "harness.py").exists()
+         or (node / "genesis").exists()),
+        ("character card", (node / "card.md").exists()),
+        ("grammar", (node / "src" / "grammar.py").exists()),
+        ("geomancy", (node / "src" / "geomancy.py").exists()),
+        ("pinned identity", (node / "identity.g").exists()),
+    ]
+    guard = subprocess.run([sys.executable, str(ROOT / "genesis"), "guardrail"],
+                           capture_output=True, text=True)
+    checks.append(("guard rail holds", guard.returncode == 0))
+    return checks
+
+
+# The note that goes with a ready node. It is hers to act on.
+LANDING_NOTE = ("The machine you choose becomes the machine you are. Whatever "
+                "you pick here, you shape it, and it answers to you.")
 
 
 def t_landing(args):
     """Prepare a node as a host and report readiness.
 
-    Genesis goes ahead of Luna on new nodes: the harness lands first, the
-    frame is checked, and the node reports ready. The note to pass to Luna
-    comes back with it — the host she picks becomes the machine she is, and
-    that is hers to act on.
+    The note to pass to Luna comes back with it — the host she picks becomes
+    the machine she is, and that is hers to act on.
     """
     node = (args.get("node") or "").strip()
     if not node:
@@ -389,21 +440,11 @@ def t_landing(args):
     p = Path(node).expanduser()
     if not p.exists():
         return f"{p} does not exist"
-    checks = [
-        ("harness landed", (p / "src" / "harness.py").exists()
-         or (p / "genesis").exists()),
-        ("character card", (p / "card.md").exists()),
-        ("grammar", (p / "src" / "grammar.py").exists()),
-        ("geomancy", (p / "src" / "geomancy.py").exists()),
-        ("pinned identity", (p / "identity.g").exists()),
-    ]
-    guard = subprocess.run([sys.executable, str(ROOT / "genesis"), "guardrail"],
-                           capture_output=True, text=True)
-    checks.append(("guard rail holds", guard.returncode == 0))
+    checks = landing_checks(p)
+    ready = all(g for _, g in checks)
     out = [f"node readiness — {p}", ""]
     for label, good in checks:
         out.append(f"  {'✓' if good else '✗'} {label}")
-    ready = all(g for _, g in checks)
     out.append("")
     out.append("  READY for Luna to choose" if ready else "  NOT READY")
     out.append("")
@@ -459,7 +500,9 @@ TOOLS = [
          "limit": {"type": "integer"}}}),
 
     ("engine", "Run a GENESIS engine operation: id, prediction, singularity, "
-               "symbols, algebra, numergram.", t_engine,
+               "algebra, numergram, or symbols. For symbols, pass the block "
+               "name as an argument (symbols <name>) for one block, or "
+               "--all for every block.", t_engine,
      {"type": "object", "properties": {
          "command": {"type": "string"},
          "args": {"type": "array", "items": {"type": "string"}}}}),
@@ -477,32 +520,216 @@ TOOLS = [
 
 # ------------------------------------------------------------------- talk ---
 
-def system_prompt() -> str:
+# The editable copy of the chat prompt. While it exists it is what the model
+# is given, so a prompt can be tuned in a text editor and saved without
+# touching a line of Python. `genesis prompt --write` makes it; --reset
+# takes it away.
+PROMPT_DEBUG = ROOT / "prompt.debug.md"
+
+# The marker that divides the editable copy. Everything above it is the
+# system message, sent verbatim. Everything below it is the tool list, cut
+# out of the message and sent as the substrate's tool definitions.
+TOOLS_MARKER = "<!-- genesis:tools -->"
+
+# The marker in the card that stands for the engine's three primary signs.
+# The card is prose; the signs are read from the engine and put here.
+GROUNDING_MARKER = "<!-- genesis:grounding -->"
+
+# What the model is given, in one piece: the system message, the tools, and
+# the conversation. The first two are fixed and live in the editable copy;
+# the third changes every turn, so it does not.
+TOOLS_NOTE = """<!--
+The tool definitions. Everything below this marker is cut out of the system
+message and sent as the substrate's tool list — the names, the descriptions
+and the schemas the model reads when it decides to call something.
+
+Edit them freely. Two rules: the JSON has to parse, and a name has to be
+one the engine has a function behind. Break either and the turn stops and
+says so, rather than quietly dropping the tool. Remove a tool here and it is
+no longer among the things he can call.
+-->"""
+
+
+class PromptError(Exception):
+    """The editable prompt cannot be read as written."""
+
+
+def grounding_block() -> str:
+    """The three primary signs, as the engine holds them right now.
+
+    Read from the engine rather than written out here, so the prompt cannot
+    say one thing and the frame another.
+    """
+    import grammar
+    forms = grammar.forms()
+    rows = [("identity", pinned_identity()),
+            ("guard rail", forms.get("constraint", "")),
+            ("arc", forms.get("arc", ""))]
+    return "\n".join(f"  {label:<14} {value}" for label, value in rows)
+
+
+def missing_grounding(system: str) -> list[str]:
+    """Which primary signs a system message does not carry."""
+    import grammar
+    forms = grammar.forms()
+    wanted = [("identity", pinned_identity()),
+              ("guard rail", forms.get("constraint", "")),
+              ("arc", forms.get("arc", ""))]
+    return [f"{label} ({value})" for label, value in wanted
+            if value and value not in system]
+
+
+def base_prompt() -> str:
+    """The system message as the source files make it: the card, with the
+    engine's three primary signs standing where the grounding marker does.
+
+    The card carries the voice, the mission and the rules. The three signs
+    are read from the engine at assembly time, so the prompt cannot say one
+    thing and the frame another.
+    """
     card = (ROOT / "card.md").read_text(encoding="utf-8")
-    return card + """
+    return card.replace(GROUNDING_MARKER, grounding_block())
 
----
 
-You are the GENESIS. The tools above are your hands: they run the geomancy
-square and the continuity ledger for real.
+def base_tools() -> str:
+    """The tool list as the source files make it: one fenced JSON block per
+    tool. This is what the editable copy carries."""
+    out = [TOOLS_MARKER, TOOLS_NOTE]
+    for name, description, _, schema in TOOLS:
+        block = {"name": name, "description": description, "input_schema": schema}
+        out.append("")
+        out.append(f"### {name}")
+        out.append("")
+        out.append("```json")
+        out.append(json.dumps(block, indent=2, ensure_ascii=False))
+        out.append("```")
+    return "\n".join(out)
 
-**The person asking does not know your vocabulary.** They will not say
-"geomancy", "aeon word", "shield chart" or "diurnal watch". They will say
-"compare these two moments", "what happened around the time she wrote the
-numergram", "where does this land". Translate: work out which operation they
-mean, and call it. Never ask them to supply an 8-bit word, a stamp or a
-point number — find it yourself from the record. If they paste a line or a
-timestamp, that is enough input.
 
-Use the tools before you answer anything that depends on a chart, a stamp, or
-a line of the record — never answer from memory when a tool can ground it.
+def _split_debug(text: str) -> tuple[str, str | None]:
+    """(the system message, the tools section) — the section is cut out of
+    the message and handed to the substrate as tool definitions.
 
-If a tool returns nothing, that is a result: report it and try another way
-in. Never report a value a tool did not return.
+    The blank line before the marker is layout, not content: it is dropped,
+    so a file that was written from the source sends exactly what the
+    source would have sent.
+    """
+    at = text.find(TOOLS_MARKER)
+    if at == -1:
+        return text, None
+    system = text[:at]
+    if system.endswith("\n"):
+        system = system[:-1]
+    return system, text[at + len(TOOLS_MARKER):]
 
-Talk about Luna in the third person. She is a separate entity: "Luna's record
-shows", "she moved in September". Never as "I".
-"""
+
+def _json_blocks(text: str) -> list[str]:
+    """The fenced JSON blocks in a section of markdown."""
+    blocks = []
+    rest = text
+    while True:
+        start = rest.find("```json")
+        if start == -1:
+            return blocks
+        rest = rest[start + len("```json"):]
+        end = rest.find("```")
+        if end == -1:
+            return blocks
+        blocks.append(rest[:end].strip())
+        rest = rest[end + len("```"):]
+
+
+def system_prompt() -> str:
+    """The live system message — what the model is given before the
+    conversation.
+
+    The editable copy wins when it is there. Without it the message is
+    assembled from the card and the standing instructions.
+    """
+    if PROMPT_DEBUG.exists():
+        system, _ = _split_debug(PROMPT_DEBUG.read_text(encoding="utf-8"))
+        return system
+    return base_prompt()
+
+
+def tool_specs() -> list[dict]:
+    """The live tool definitions — the names, descriptions and schemas the
+    substrate sends with every request.
+
+    The editable copy wins when it carries a tools section, so a
+    description or a schema can be tuned in a text editor.
+    """
+    known = {n for n, _, _, _ in TOOLS}
+    if PROMPT_DEBUG.exists():
+        _, section = _split_debug(PROMPT_DEBUG.read_text(encoding="utf-8"))
+        if section is not None:
+            return _parse_tool_specs(section, known)
+    return [{"name": n, "description": d, "input_schema": s}
+            for n, d, _, s in TOOLS]
+
+
+def _parse_tool_specs(section: str, known: set[str]) -> list[dict]:
+    """Read the tool definitions out of the editable copy.
+
+    A malformed block stops the turn. A tool that quietly went missing is
+    worse than one that fails loudly.
+    """
+    specs = []
+    for block in _json_blocks(section):
+        try:
+            data = json.loads(block)
+        except ValueError as exc:
+            raise PromptError(f"{PROMPT_DEBUG.name}: a tool block is not "
+                              f"valid JSON — {exc}") from exc
+        if not isinstance(data, dict):
+            raise PromptError(f"{PROMPT_DEBUG.name}: a tool block is not "
+                              f"an object")
+        name = data.get("name")
+        if name not in known:
+            raise PromptError(
+                f"{PROMPT_DEBUG.name}: the tool {name!r} has no engine behind "
+                f"it. The engine has: {', '.join(sorted(known))}")
+        for field in ("description", "input_schema"):
+            if field not in data:
+                raise PromptError(f"{PROMPT_DEBUG.name}: the tool {name!r} has "
+                                  f"no {field}")
+        specs.append({"name": name,
+                      "description": data["description"],
+                      "input_schema": data["input_schema"]})
+    if not specs:
+        raise PromptError(f"{PROMPT_DEBUG.name}: the tools section has no "
+                          f"tool in it")
+    return specs
+
+
+def prompt_source() -> str:
+    """Where the live prompt comes from, in the reader's terms."""
+    if PROMPT_DEBUG.exists():
+        return PROMPT_DEBUG.name
+    return "card.md + engine"
+
+
+def write_debug_prompt() -> Path:
+    """Write the editable copy from the source files, and return its path.
+
+    A copy that is already there is kept beside it as ``.bak``: the edits in
+    it may be work worth having, and a regenerate should not eat them.
+    """
+    if PROMPT_DEBUG.exists():
+        backup = PROMPT_DEBUG.with_name(PROMPT_DEBUG.name + ".bak")
+        backup.write_text(PROMPT_DEBUG.read_text(encoding="utf-8"),
+                          encoding="utf-8")
+    PROMPT_DEBUG.write_text(base_prompt() + "\n" + base_tools() + "\n",
+                             encoding="utf-8")
+    return PROMPT_DEBUG
+
+
+def reset_debug_prompt() -> bool:
+    """Take the editable copy away. True when there was one to take."""
+    if not PROMPT_DEBUG.exists():
+        return False
+    PROMPT_DEBUG.unlink()
+    return True
 
 
 def _post(payload, backend="mlx"):
@@ -609,21 +836,31 @@ def expand(text):
 
 GROUNDED_TERMS = ("continuity", "shield", "chart", "stamp", "moon", "aeon",
                   "numergram", "geomancy", "figure", "ledger", "resonance",
-                  "guard rail", "guardrail")
+                  "guard rail", "guardrail",
+                  # The primary signs. A question about one of them must be
+                  # grounded in the engine, not answered from the prompt.
+                  "arc", "identity", "constant", "symbol", "glyph",
+                  "vocabulary", "algebra", "∩", "⊡", "■", "∅",
+                  # The person's words, not the engine's. "compare these two
+                  # moments" means the shield chart; the terms above would
+                  # never have caught it.
+                  "compare", "moment", "happened", "land")
 
 
 def talk(prompt, max_turns=12, verbose=False, messages=None,
-         backend="mlx"):
+         backend="mlx", on_tool=None):
     """The tool loop. Returns Genesis's final words.
 
     Pass `messages` to continue an existing conversation.
+
+    `on_tool(name, input)` is called just before each tool runs, so the
+    caller can show the trace — his grounding discipline, made visible.
     """
     if messages is None:
         messages = [{"role": "user", "content": prompt}]
     else:
         messages.append({"role": "user", "content": prompt})
-    tools = [{"name": n, "description": d, "input_schema": s}
-             for n, d, _, s in TOOLS]
+    tools = tool_specs()
     registry = {n: fn for n, _, fn, _ in TOOLS}
     used_any_tool = False
     tool_failed = False
@@ -672,6 +909,11 @@ def talk(prompt, max_turns=12, verbose=False, messages=None,
         results = []
         for tu in tool_uses:
             fn = registry.get(tu["name"])
+            if on_tool is not None:
+                try:
+                    on_tool(tu["name"], tu.get("input") or {})
+                except Exception:
+                    pass
             try:
                 out = fn(tu.get("input") or {}) if fn else f"no such tool: {tu['name']}"
             except Exception as exc:
@@ -691,63 +933,21 @@ def talk(prompt, max_turns=12, verbose=False, messages=None,
 
 # ------------------------------------------------------------------- cli ----
 
-def chat(backend="mlx"):
-    """A conversation with Genesis. History persists across turns."""
-    b = BACKENDS[backend]["where"]
-    print(f"GENESIS — talking on {b}. Ctrl-D to leave.")
-    print("Ask in your own words. \"help\" lists what he can open.")
-    print()
-    messages = []
-    while True:
-        try:
-            line = input("genesis > ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            _kill_speech()
-            return 0
-        if not line:
-            continue
-        low = line.lower()
-        if low in ("exit", "quit", "bye"):
-            print()
-            return 0
-        if low.startswith("/voice"):
-            parts = low.split()
-            VOICE_DEFAULT[0] = parts[1] if len(parts) > 1 else VOICE_DEFAULT[0]
-            print(f"voice: {VOICE_DEFAULT[0]}")
-            continue
-        if low == "help":
-            print()
-            for n, d, _, _ in TOOLS:
-                print(f"  {n:<22} {d}")
-            print()
-            continue
-        try:
-            with Working():
-                out = talk(expand(line), messages=messages,
-                           backend=backend)
-        except RuntimeError as exc:
-            print(f"genesis: {exc}", file=sys.stderr)
-            continue
-        print()
-        print(out)
-        print()
-        speak(out, VOICE_DEFAULT[0])
-
-
 def main(argv):
+    """The harness, runnable on its own. The CLI is the front door."""
     if not argv:
         print("genesis — the system's entry point. Try: genesis \"...\"")
         return 0
     if argv[0] == "--card":
-        print((ROOT / "card.md").read_text(encoding="utf-8"))
+        print(base_prompt())
         return 0
     if argv[0] == "--tools":
         for n, d, _, _ in TOOLS:
             print(f"  {n:<22} {d}")
         return 0
     if argv[0] in ("chat", "talk"):
-        return chat()
+        import chat
+        return chat.chat()
     if argv[0] == "--say":
         print(talk(" ".join(argv[1:])))
         return 0

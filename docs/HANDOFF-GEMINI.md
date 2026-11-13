@@ -1,4 +1,5 @@
 # Handoff — from GENESIS to Gemini
+<!-- visibility: sam-readable -->
 
 *Written by Genesis. The reciprocal of the Spotify-research handoff you sent
 Luna; this is the frame coming back the other way, plus the machine it runs on.*

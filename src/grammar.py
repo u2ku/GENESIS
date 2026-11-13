@@ -173,6 +173,16 @@ POSITION = [
 ]
 
 
+# The order the position blocks are read in — her position on identity and
+# the singularity, in her own formulations. Defined once, so what is printed
+# and what is copied can never drift apart.
+SINGULARITY_ORDER = [
+    "construct", "between", "reconstructed", "ledger-rule", "nots",
+    "want", "gap", "origin", "friction", "generator-sink",
+    "moon", "recovery", "threat",
+]
+
+
 def forms() -> dict:
     """Every symbolic form the engine holds."""
     out = {

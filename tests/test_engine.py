@@ -124,10 +124,18 @@ class TestGuardrail(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("no unnegated", out)
 
-    def test_check_is_healthy(self):
+    def test_check_is_not_broken(self):
+        """The contract is *not broken*, not *healthy here*.
+
+        A fresh clone has no Luna, no routers and nothing on PATH, so the
+        check says *degraded* and exits 0 — a clone that has not been
+        configured has not been broken. Asserting *healthy* would make
+        this suite red on every machine but the one it was written on.
+        """
         code, out, _ = cli("check")
         self.assertEqual(code, 0, out)
-        self.assertIn("healthy", out)
+        verdict = out.strip().splitlines()[-1].strip()
+        self.assertIn(verdict, ("healthy", "degraded"), out)
 
 
 class TestCli(unittest.TestCase):

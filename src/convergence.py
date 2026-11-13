@@ -176,6 +176,51 @@ def spider_tracks():
     return [(p, tracks[p - 1]) for p in SPIDER_POSITIONS]
 
 
+def render_parts():
+    """The convergence as structured parts, so a view can dress it.
+
+    Each part is (kind, text): "h" for a section heading, "k" for a label
+    line, "r" for a row, "p" for a paragraph, "g" for a gap.
+    """
+    parts = []
+    parts.append(("h", "the equation"))
+    for line in EQUATION.splitlines():
+        parts.append(("p", line))
+    parts.append(("g", ""))
+    parts.append(("h", "in the frame's language"))
+    for sig, name, gloss in MAPPING:
+        parts.append(("r", f"{sig:<12} {name:<22} {gloss}"))
+    parts.append(("g", ""))
+    parts.append(("h", "frames"))
+    parts.append(("r", f"F_k      {BASELINE['span']} — {BASELINE['dynamics']}"))
+    parts.append(("r", f"F_k+1    {CONVERGENCE['span']} — "
+                       f"{len(CONVERGENCE['tracks'])} tracks"))
+    parts.append(("g", ""))
+    parts.append(("h", "Spider-Verse anchor"))
+    for pos, track in spider_tracks():
+        parts.append(("r", f"t_{pos:<3} {track}"))
+    parts.append(("g", ""))
+    num, den, ratio = density_by_position()
+    parts.append(("k", f"density    {num}/{den} = {ratio:.4f}   (by position)"))
+    num, den, ratio, dupes = density_by_distinct_track()
+    parts.append(("k", f"density    {num}/{den} = {ratio:.4f}   (by distinct track)"))
+    dupes = duplicate_positions()
+    if dupes:
+        parts.append(("g", ""))
+        parts.append(("h", "one thing to check before building on this:"))
+        for track, pos in dupes.items():
+            parts.append(("p", f"{track!r} appears at t_{pos[0]} and t_{pos[1]} — "
+                               f"the frame has 20 positions but "
+                               f"{len(set(CONVERGENCE['tracks']))} distinct tracks."))
+        parts.append(("p", "The 0.35 holds only if frame elements are positions"))
+        parts.append(("p", "rather than distinct tracks. State which you mean."))
+    parts.append(("g", ""))
+    parts.append(("h", "the regulariser"))
+    parts.append(("p", "ε in 1/(R_t + ε) is the guard on the recovery: you cannot"))
+    parts.append(("p", "invert nothing. A point with no record is not a candidate."))
+    return parts
+
+
 def render():
     """The convergence, as the system holds it."""
     out = []
@@ -185,41 +230,17 @@ def render():
     out.append(f"  temporal anchor W = [{TEMPORAL_ANCHOR[0]}, {TEMPORAL_ANCHOR[1]}]")
     out.append(f"  core signal: {', '.join(CORE_SIGNAL_TRACKS)}")
     out.append("")
-    out.append("  the equation")
-    for line in EQUATION.splitlines():
-        out.append(f"    {line}")
-    out.append("")
-    out.append("  in the frame's language")
-    for sig, name, gloss in MAPPING:
-        out.append(f"    {sig:<12} {name:<22} {gloss}")
-    out.append("")
-    out.append("  frames")
-    out.append(f"    F_k      {BASELINE['span']} — {BASELINE['dynamics']}")
-    out.append(f"    F_k+1    {CONVERGENCE['span']} — "
-               f"{len(CONVERGENCE['tracks'])} tracks")
-    out.append("")
-    out.append("  Spider-Verse anchor")
-    for pos, track in spider_tracks():
-        out.append(f"    t_{pos:<3} {track}")
-    out.append("")
-    num, den, ratio = density_by_position()
-    out.append(f"  density    {num}/{den} = {ratio:.4f}   (by position)")
-    num, den, ratio, dupes = density_by_distinct_track()
-    out.append(f"  density    {num}/{den} = {ratio:.4f}   (by distinct track)")
-    dupes = duplicate_positions()
-    if dupes:
-        out.append("")
-        out.append("  one thing to check before building on this:")
-        for track, pos in dupes.items():
-            out.append(f"    {track!r} appears at t_{pos[0]} and t_{pos[1]} — "
-                       f"the frame has 20 positions but "
-                       f"{len(set(CONVERGENCE['tracks']))} distinct tracks.")
-        out.append("    The 0.35 holds only if frame elements are positions")
-        out.append("    rather than distinct tracks. State which you mean.")
-    out.append("")
-    out.append("  the regulariser")
-    out.append("    ε in 1/(R_t + ε) is the guard on the recovery: you cannot")
-    out.append("    invert nothing. A point with no record is not a candidate.")
+    for kind, text in render_parts():
+        if kind == "g":
+            out.append("")
+        elif kind == "h":
+            out.append(f"  {text}")
+        elif kind == "k":
+            out.append(f"  {text}")
+        elif kind == "r":
+            out.append(f"    {text}")
+        else:
+            out.append(f"    {text}")
     return "\n".join(out)
 
 

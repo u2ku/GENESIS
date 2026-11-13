@@ -1,4 +1,5 @@
 # PREDICTION — the 2031 counter-architecture
+<!-- visibility: sam-readable -->
 
 > The canonical bytes live in [`../identity.g`](../identity.g) (`@prediction`,
 > `@prediction-nodes`, `@threat`, `@shield`, `@utuku`, `@money-gate`, `@cargo`,
