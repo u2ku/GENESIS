@@ -102,6 +102,23 @@ class WizardCase(unittest.TestCase):
             p.start()
         self.addCleanup(lambda: [p.stop() for p in self.patches])
 
+        # The wizard's last act is to open a browser, and a test must
+        # never do that for real: a window that opens on someone's desk
+        # during a test run is the suite being rude. The seam is patched
+        # for the whole case, so no test can reach the real `open` by
+        # forgetting to — the opener is recorded, and the recording is
+        # what the tests assert on.
+        self.opened = []
+        shutil_patcher = mock.patch.object(cli_module, "shutil")
+        subprocess_patcher = mock.patch.object(cli_module, "subprocess")
+        self.shutil_mock = shutil_patcher.start()
+        self.subprocess_mock = subprocess_patcher.start()
+        self.addCleanup(subprocess_patcher.stop)
+        self.addCleanup(shutil_patcher.stop)
+        self.shutil_mock.which.return_value = "/usr/bin/open"
+        self.subprocess_mock.Popen.side_effect = \
+            lambda argv, **kw: self.opened.append(argv)
+
         self.out = io.StringIO()
 
     def wizard(self, tty=False, answer=None):
@@ -252,86 +269,81 @@ class TestTheFinish(WizardCase):
         sys.modules["codexify_native"].setup = fake_setup
         sys.modules["codexify_native"].make_launcher = (
             lambda install, where: (True, "~/Desktop/Codexify.app"))
-        opened = []
-        with mock.patch.object(cli_module, "shutil") as fake_shutil:
-            fake_shutil.which.return_value = "/usr/bin/open"
-            with mock.patch.object(cli_module, "subprocess") as fake_sub:
-                fake_sub.Popen.side_effect = \
-                    lambda argv, **kw: opened.append(argv)
-                with mock.patch("sys.stdout", io.StringIO()):
-                    self.wizard()
+        with mock.patch("sys.stdout", io.StringIO()):
+            self.wizard()
         self.assertTrue(seen.get("with_ui"))
-        self.assertEqual(opened, [["/usr/bin/open", "http://127.0.0.1:5173"]])
+        self.assertEqual(self.opened,
+                         [["/usr/bin/open", "http://127.0.0.1:5173"]])
 
     def test_no_ui_means_the_api_opens(self):
         self.find_install[0] = self.installed_d
         self.setup_done[0] = True
-        opened = []
         args = SimpleNamespace(python=None, preset=None, model=None,
                                allow_cloud=False, with_ui=None, no_ui=True,
                                dry_run=False, launcher=None,
                                no_launcher=False, wizard=True,
                                codexify=None)
         ctx = SimpleNamespace(style=term.make_style(plain=True))
-        with mock.patch.object(cli_module, "shutil") as fake_shutil:
-            fake_shutil.which.return_value = "/usr/bin/open"
-            with mock.patch.object(cli_module, "subprocess") as fake_sub:
-                fake_sub.Popen.side_effect = \
-                    lambda argv, **kw: opened.append(argv)
-                with mock.patch.object(cli_module, "emit",
-                                       side_effect=lambda t: None):
-                    with mock.patch("sys.stdout", io.StringIO()):
-                        cli_module._codexify_wizard(
-                            args, ctx, sys.modules["codexify"], None)
-        self.assertEqual(opened, [["/usr/bin/open", "http://127.0.0.1:8888"]])
+        with mock.patch.object(cli_module, "emit",
+                               side_effect=lambda t: None):
+            with mock.patch("sys.stdout", io.StringIO()):
+                cli_module._codexify_wizard(
+                    args, ctx, sys.modules["codexify"], None)
+        self.assertEqual(self.opened,
+                         [["/usr/bin/open", "http://127.0.0.1:8888"]])
     """The wizard's last act: open what the stack is serving."""
 
     def test_the_wizard_opens_the_interface_when_it_finishes(self):
         self.find_install[0] = self.installed_d
         self.setup_done[0] = True
-        opened = []
-        with mock.patch.object(cli_module, "shutil") as fake_shutil:
-            fake_shutil.which.return_value = "/usr/bin/open"
-            with mock.patch.object(cli_module, "subprocess") as fake_sub:
-                fake_sub.Popen.side_effect = \
-                    lambda argv, **kw: opened.append(argv)
-                with mock.patch("sys.stdout", io.StringIO()):
-                    code = self.wizard()
+        with mock.patch("sys.stdout", io.StringIO()):
+            code = self.wizard()
         self.assertEqual(code, EXIT_OK)
-        self.assertEqual(opened, [["/usr/bin/open", "http://127.0.0.1:5173"]])
+        self.assertEqual(self.opened,
+                         [["/usr/bin/open", "http://127.0.0.1:5173"]])
 
     def test_the_interface_opens_with_ui(self):
         self.find_install[0] = self.installed_d
         self.setup_done[0] = True
-        opened = []
-        with mock.patch.object(cli_module, "shutil") as fake_shutil:
-            fake_shutil.which.return_value = "/usr/bin/open"
-            with mock.patch.object(cli_module, "subprocess") as fake_sub:
-                fake_sub.Popen.side_effect = \
-                    lambda argv, **kw: opened.append(argv)
-                args = SimpleNamespace(python=None, preset=None, model=None,
-                                       allow_cloud=False, with_ui=True,
-                                       dry_run=False, launcher=None,
-                                       no_launcher=False, wizard=True,
-                                       codexify=None)
-                ctx = SimpleNamespace(style=term.make_style(plain=True))
-                with mock.patch.object(cli_module, "emit",
-                                       side_effect=lambda t: None):
-                    with mock.patch("sys.stdout", io.StringIO()):
-                        code = cli_module._codexify_wizard(
-                            args, ctx, sys.modules["codexify"], None)
+        args = SimpleNamespace(python=None, preset=None, model=None,
+                               allow_cloud=False, with_ui=True,
+                               dry_run=False, launcher=None,
+                               no_launcher=False, wizard=True,
+                               codexify=None)
+        ctx = SimpleNamespace(style=term.make_style(plain=True))
+        with mock.patch.object(cli_module, "emit",
+                               side_effect=lambda t: None):
+            with mock.patch("sys.stdout", io.StringIO()):
+                code = cli_module._codexify_wizard(
+                    args, ctx, sys.modules["codexify"], None)
         self.assertEqual(code, EXIT_OK)
-        self.assertEqual(opened, [["/usr/bin/open", "http://127.0.0.1:5173"]])
+        self.assertEqual(self.opened,
+                         [["/usr/bin/open", "http://127.0.0.1:5173"]])
 
     def test_no_opener_means_the_url_is_printed(self):
         self.find_install[0] = self.installed_d
         self.setup_done[0] = True
         captured = io.StringIO()
-        with mock.patch.object(cli_module, "shutil") as fake_shutil:
-            fake_shutil.which.return_value = None
-            with mock.patch("sys.stdout", captured):
-                self.wizard()
+        self.shutil_mock.which.return_value = None
+        with mock.patch("sys.stdout", captured):
+            self.wizard()
         self.assertIn("http://127.0.0.1:5173", captured.getvalue())
+        self.assertEqual(self.opened, [])
+
+    def test_the_suite_never_opens_a_real_browser(self):
+        """A window on someone's desk is the suite being rude.
+
+        The wizard's last act really does open a browser — that is what
+        it is for — so the seam is what is patched, for every test in
+        the case, and what is recorded is the command that would have
+        run.
+        """
+        self.find_install[0] = self.installed_d
+        self.setup_done[0] = True
+        with mock.patch("sys.stdout", io.StringIO()):
+            self.wizard()
+        self.assertEqual(len(self.opened), 1)
+        self.assertEqual(self.opened[0][0], "/usr/bin/open")
 
 
 class TestTheRetryPrompt(WizardCase):

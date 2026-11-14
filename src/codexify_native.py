@@ -109,9 +109,15 @@ HEAVY_PACKAGES = (
 # is a container habit the native path inherits: the backend imports both
 # drivers (`guardian/db/postgres_setup.py` wants 2, the pins carry 3), and
 # the container gets it from `backend/requirements.txt` — a second pin file
-# the native path does not read.
+# the native path does not read. `psycopg[binary]` is here for the native
+# path's own sake: the database bootstrap below imports driver 3, and a
+# machine whose pins never carried it must still be able to make its
+# database. `pyjwt` and `python-multipart` are that second file's too: the
+# auth middleware imports `jwt`, and the API's form routes make FastAPI
+# demand the multipart parser at import time.
 BASE_GAPS = ("httpx", "numpy", "bcrypt", "cryptography", "faiss-cpu",
-             "huggingface_hub", "psycopg2-binary")
+             "huggingface_hub", "psycopg[binary]", "psycopg2-binary",
+             "pyjwt", "python-multipart")
 
 # Packages the pinned file carries for Python 3.13, where the stdlib dropped
 # them. On 3.11 — what the native path asks for by preference — the stdlib
@@ -123,13 +129,59 @@ PY313_ONLY_PACKAGES = ("audioop-lts",)
 # The ports the native stack listens on.
 POSTGRES_PORT = 5432
 REDIS_PORT = 6379
-BACKEND_PORT = 8888
-FRONTEND_PORT = 5173
+BACKEND_PORT = codexify.BACKEND_PORT
+FRONTEND_PORT = codexify.FRONTEND_PORT
 
 # How long the backend may take to come up before readiness calls it a
 # failure. A container's healthcheck has retries; a one-shot probe does not,
 # so the probe becomes a wait.
 STARTUP_TIMEOUT = 90.0
+
+# How long the interface may take to come up. Vite resolves its dependency
+# graph before it binds, and `--force` makes it do that from scratch every
+# time — seconds, not milliseconds. The interface gets the same patience
+# the backend gets, because it is the same kind of wait.
+FRONTEND_WAIT = 90.0
+
+
+# --------------------------------------------------------------- the waiting --
+
+class _Silent:
+    """A spinner that is not there, for a place that cannot show one."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+def _spinner(label: str):
+    """A spinner for the long quiet stretches, where there is a terminal.
+
+    The venv build is minutes of `pip --quiet`. The backend takes real
+    seconds to bind, and vite takes real seconds to resolve its
+    dependency graph before it will answer. A terminal that says nothing
+    for a minute and a half is a terminal that looks broken — and a
+    wizard that looks broken is a wizard nobody waits for.
+
+    The spinner writes to stderr and only animates where there is a
+    terminal, so a redirected run stays a clean transcript.
+    """
+    try:
+        from term import Spinner
+    except Exception:
+        return _Silent()
+    try:
+        return Spinner(sys.stderr, label=label)
+    except Exception:
+        return _Silent()
+
+
+def _with_spinner(label: str, function, *args, **kwargs):
+    """Run a slow thing with a spinner saying what is slow."""
+    with _spinner(label):
+        return function(*args, **kwargs)
 
 # The brew commands that provide what the native path needs. The wizard
 # prints them and does not run them: installing system packages is the
@@ -278,8 +330,15 @@ def native_requirements(install: Path,
     if python_version is None:
         python_version = PYTHON_PREFERRED
     lines: list[str] = []
-    source = install / "requirements.txt"
-    if source.is_file():
+    # The pins have moved: `requirements.txt` at the root was the container
+    # habit, and the submodule now carries them under `requirements/all.txt`.
+    # Both spellings are honoured, and the one that is there is the one
+    # that is read — a submodule that has moved its pins is not a machine
+    # with nothing to install.
+    candidates = (install / "requirements.txt",
+                  install / "requirements" / "all.txt")
+    source = next((c for c in candidates if c.is_file()), None)
+    if source is not None:
         for raw in source.read_text(encoding="utf-8").splitlines():
             line = raw.strip()
             if not line or line.startswith("#") or line.startswith("-"):
@@ -293,8 +352,12 @@ def native_requirements(install: Path,
                 continue
             lines.append(line)
     for name in BASE_GAPS:
+        # A gap may name an extra — `psycopg[binary]` — and the lines it is
+        # compared against carry their extras stripped by the split above, so
+        # the gap is compared by its stem, the package the extra is of.
+        stem = name.split("[", 1)[0].strip().lower().replace("_", "-")
         if not any(re.split(r"[=<>!~\[]", line, maxsplit=1)[0].strip().lower()
-                   .replace("_", "-") == name for line in lines):
+                   .replace("_", "-") == stem for line in lines):
             lines.append(name)
     return lines
 
@@ -679,7 +742,12 @@ def _child_env(install: Path) -> dict:
 # -------------------------------------------------------------- the processes --
 
 def supervisor_running(install: Path) -> Optional[int]:
-    """The supervisor's pid, if it is still alive."""
+    """The supervisor's pid, if it is still alive.
+
+    A zombie is not alive. It is a process that has already died and is
+    waiting to be reaped: it cannot be stopped, it holds nothing, and
+    the next start must not be refused because of it.
+    """
     pid_file = install / SUPERVISOR_PID
     if not pid_file.is_file():
         return None
@@ -687,11 +755,111 @@ def supervisor_running(install: Path) -> Optional[int]:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
-    try:
-        os.kill(pid, 0)
-    except OSError:
+    if not codexify.pid_alive(pid):
         return None
     return pid
+
+
+def _child_pid(install: Path, name: str) -> Optional[int]:
+    """The pid the supervisor recorded for one of its children."""
+    pid_file = install / PID_DIR / f"{name}.pid"
+    if not pid_file.is_file():
+        return None
+    try:
+        return int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _child_pids(install: Path) -> list[int]:
+    """Every pid the supervisor recorded for its children."""
+    pid_dir = install / PID_DIR
+    if not pid_dir.is_dir():
+        return []
+    pids = []
+    for pid_file in sorted(pid_dir.glob("*.pid")):
+        try:
+            pids.append(int(pid_file.read_text(encoding="utf-8").strip()))
+        except (OSError, ValueError):
+            continue
+    return pids
+
+
+def _is_ours(install: Path, pid: int) -> bool:
+    """Does this pid belong to this installation?
+
+    A pid file is a claim, and a pid is reused. Before a leftover is
+    stopped, the process is asked where it works: a process whose working
+    directory is this install is our own orphan, and one that is not is
+    somebody else's process that happens to have the same number.
+    """
+    cwd = codexify.process_cwd(pid)
+    if not cwd:
+        return False
+    try:
+        return Path(cwd).resolve().is_relative_to(install.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _is_orphaned(pid: int) -> bool:
+    """Is this process's working directory gone?
+
+    A process whose working directory has been deleted is the last
+    survivor of an installation that was removed: the install's pid
+    files went with it, so nothing else can stop it, and the port it
+    holds will be held until somebody stops it by hand.
+    """
+    cwd = codexify.process_cwd(pid)
+    if not cwd:
+        return False
+    return not Path(cwd).exists()
+
+
+def _port_squatter(install: Path, with_ui: bool) -> Optional[str]:
+    """Who is holding a port this install needs, if it is not us.
+
+    A port held by somebody else is a port this backend cannot have.
+    Starting anyway loses the race silently: the new backend dies on the
+    bind, and the health checks that follow answer the process that
+    already held the port. So the port is checked before the start, and
+    the holder is named — an install that was moved to the trash keeps
+    its socket open long after it stopped being the install.
+    """
+    wanted = [(BACKEND_PORT, "backend")]
+    if with_ui:
+        wanted.append((FRONTEND_PORT, "the interface"))
+    for port, label in wanted:
+        holder = codexify.port_holder(port)
+        if holder is None:
+            continue
+        cwd = codexify.process_cwd(holder) or "another installation"
+        if _is_ours(install, holder):
+            return (f":{port} is held by pid {holder}, which is this "
+                    f"install's own leftover and could not be stopped")
+        if _is_orphaned(holder):
+            return (f":{port} is held by pid {holder}, an orphan of an "
+                    f"installation that has been deleted — nothing can stop "
+                    f"it by record any more, so stop it by hand and run "
+                    f"again")
+        return (f":{port} is held by pid {holder} ({cwd}), which is not this "
+                f"install's {label} — stop it before starting")
+    return None
+
+
+def _settle_ports(with_ui: bool) -> None:
+    """Wait a moment for a port to be released by a process that just died.
+
+    A socket is closed as its process dies, which is a moment after the
+    signal. The leftovers are given that moment, so that a port which
+    has just been cleared is not called somebody else's.
+    """
+    ports = [BACKEND_PORT] + ([FRONTEND_PORT] if with_ui else [])
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if all(codexify.port_holder(port) is None for port in ports):
+            return
+        time.sleep(0.2)
 
 
 def start(install: Path, with_ui: bool = False,
@@ -701,8 +869,34 @@ def start(install: Path, with_ui: bool = False,
         return False, "the native supervisor is already running"
     if not venv_python(install):
         return False, "there is no environment to run from"
+
+    # A port is released as its process dies, which is a moment after the
+    # signal. A start that follows a stop gives the old socket that
+    # moment before it calls the port somebody else's.
+    _settle_ports(with_ui)
+
+    squatter = _port_squatter(install, with_ui)
+    if squatter:
+        return False, squatter
+
     (install / PID_DIR).mkdir(parents=True, exist_ok=True)
     (install / LOG_DIR).mkdir(parents=True, exist_ok=True)
+
+    # The pid files belong to the run that is starting. Last run's pids
+    # are stale claims, and a stale claim read as this run's is how the
+    # wrong process gets blamed for holding a port.
+    for stale in (install / PID_DIR).glob("*.pid"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    supervisor_pid_file = install / SUPERVISOR_PID
+    if supervisor_pid_file.is_file():
+        try:
+            supervisor_pid_file.unlink()
+        except OSError:
+            pass
+
     args = [sys.executable, str(SUPERVISOR), "--install", str(install)]
     if with_ui:
         args.append("--with-ui")
@@ -719,6 +913,38 @@ def start(install: Path, with_ui: bool = False,
     return True, f"the supervisor is running (pid {process.pid})"
 
 
+def _stop_child_groups(install: Path, pids: list[int]) -> None:
+    """Stop each child's whole process group, politely and then not.
+
+    A child is its own session, so the group is the only thing that
+    reaches what it spawned: `pnpm` leaves `vite` behind when it dies
+    alone, and an orphaned vite holds the port forever.
+
+    Only this install's own processes are stopped. A pid that belongs to
+    another installation is somebody else's business, even when this
+    install's pid file names it.
+    """
+    import signal
+    for pid in pids:
+        if not codexify.pid_alive(pid):
+            continue
+        if not _is_ours(install, pid):
+            continue
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pid, sig)
+            except OSError:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and codexify.pid_alive(pid):
+                time.sleep(0.1)
+            if not codexify.pid_alive(pid):
+                break
+
+
 def stop(install: Path) -> tuple[bool, str]:
     """Stop the supervisor, and with it everything it started.
 
@@ -728,30 +954,74 @@ def stop(install: Path) -> tuple[bool, str]:
     then with SIGKILL, and it reports what actually happened. A stop
     that gives up waiting but says "down" puts the next start in the
     impossible position of refusing a supervisor it was told was gone.
+
+    The children are stopped whether or not the supervisor is alive. A
+    supervisor that was killed before its own cleanup ran leaves them
+    behind — each child is its own process group, so an orphaned backend
+    keeps the port and the next start loses the race for it without
+    saying so.
+
+    The ports are checked last, because the ports are the truth. A stack
+    that still holds one of its own ports is not down, whatever the pid
+    files say. A port held by somebody else is not our stack's port:
+    ours is down, and the stranger is named, because it will stand in
+    the way of the next start.
     """
     pid = supervisor_running(install)
-    if pid is None:
+    children = _child_pids(install)
+    if pid is None and not children:
         return False, "the native supervisor is not running"
-    try:
-        os.kill(pid, 15)
-    except OSError as exc:
-        return False, f"the supervisor could not be stopped: {exc}"
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline and supervisor_running(install):
-        time.sleep(0.2)
-    if supervisor_running(install):
-        # Polite did not work. Force it, and wait again — a kill -9 is
-        # instant for the parent, but the children are ours to reap too.
+    if pid is not None:
         try:
-            os.kill(pid, 9)
-        except OSError:
-            pass
-        deadline = time.monotonic() + 5.0
+            os.kill(pid, 15)
+        except OSError as exc:
+            return False, f"the supervisor could not be stopped: {exc}"
+        deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline and supervisor_running(install):
             time.sleep(0.2)
-    if supervisor_running(install):
-        return False, (f"the supervisor (pid {pid}) did not stop — "
-                       "it may need killing by hand")
+        if supervisor_running(install):
+            # Polite did not work. Force it, and wait again — a kill -9 is
+            # instant for the parent, but the children are ours to reap too.
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and supervisor_running(install):
+                time.sleep(0.2)
+        if supervisor_running(install):
+            return False, (f"the supervisor (pid {pid}) did not stop — "
+                           "it may need killing by hand")
+
+    _stop_child_groups(install, children)
+
+    # The ports are checked last, because the ports are the truth — but
+    # only about *our* stack. A port held by another installation is not
+    # our stack's port: our stack is down, and the stranger is named
+    # because it will stand in the way of the next start. A port we
+    # cannot read the owner of is treated as ours: a stack that cannot
+    # be proven down is not down.
+    held = []
+    strangers = []
+    for port in (BACKEND_PORT, FRONTEND_PORT):
+        holder = codexify.port_holder(port)
+        if holder is None:
+            continue
+        cwd = codexify.process_cwd(holder)
+        if cwd is None:
+            held.append(f":{port} (pid {holder}, its working directory "
+                        f"could not be read)")
+        elif _is_ours(install, holder) or _is_orphaned(holder):
+            held.append(f":{port} (pid {holder}, {cwd})")
+        else:
+            strangers.append(f":{port} (pid {holder}, {cwd})")
+    if held:
+        return False, ("the supervisor is down but a port is still held: "
+                       + ", ".join(held))
+    if strangers:
+        return True, ("the stack is down — but a port it needs is held by "
+                      "another installation: " + ", ".join(strangers)
+                      + "; stop it before starting")
     return True, "the stack is down"
 
 
@@ -768,11 +1038,7 @@ def process_rows(install: Path) -> list[Row]:
         except (OSError, ValueError):
             rows.append(Row(name, BAD, "the pid file is unreadable"))
             continue
-        alive = True
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            alive = False
+        alive = codexify.pid_alive(pid)
         log = install / LOG_DIR / f"{name}.log"
         detail = f"pid {pid}"
         if not alive:
@@ -886,7 +1152,9 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
                 else f"{env_path} is already what it would be (mode 0600)"))
 
     # -- build -------------------------------------------------------------
-    built, detail = build_environment(install, python=python, runner=runner)
+    built, detail = _with_spinner(
+        "installing the environment",
+        build_environment, install, python=python, runner=runner)
     report.add("the environment", OK if built else BAD, detail)
     if not built:
         report.exit_code = EXIT_PREREQUISITE
@@ -914,7 +1182,8 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
         report.verdict = "the database could not be made — nothing else ran"
         return report
 
-    migrated, detail = migrate(install, runner=runner)
+    migrated, detail = _with_spinner(
+        "migrating the schema", migrate, install, runner=runner)
     report.add("the schema", OK if migrated else BAD, detail)
     if not migrated:
         report.exit_code = EXIT_PARTIAL
@@ -928,14 +1197,22 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
     # The stop is waited for, not assumed: a teardown that outlives the
     # patience would otherwise leave the start refusing a supervisor it
     # was told was gone.
-    if supervisor_running(install):
-        stopped, detail = stop(install)
+    #
+    # The stop happens even when the supervisor is gone. A supervisor that
+    # was killed leaves its children behind — they are their own process
+    # groups — and they keep the ports. A setup that skipped the stop
+    # would then start a backend that cannot bind, and every health
+    # check would answer the leftovers.
+    if supervisor_running(install) or _child_pids(install):
+        stopped, detail = _with_spinner("stopping the old stack", stop,
+                                         install)
         if not stopped:
             report.add("the processes", BAD, detail)
             report.exit_code = EXIT_PARTIAL
             report.verdict = "the old stack did not stop — nothing was started"
             return report
-    started, detail = start(install, with_ui=with_ui, runner=runner)
+    started, detail = _with_spinner("starting the stack", start,
+                                     install, with_ui=with_ui, runner=runner)
     report.add("the processes", OK if started else BAD, detail)
     if not started:
         report.exit_code = EXIT_PARTIAL
@@ -949,15 +1226,28 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
     # measures the boot. Wait for it to answer, then read the readiness.
     getter = http_getter or codexify._http_get
     deadline = time.monotonic() + STARTUP_TIMEOUT
-    while time.monotonic() < deadline:
-        status, _ = getter(f"{codexify.HEALTH_BACKEND}/ping", 3.0)
-        if status == 200:
-            break
-        time.sleep(1.0)
-    for row in codexify.readiness(install, runner=runner,
-                                   http_getter=getter,
-                                   skip_docker=True,
-                                   skip_frontend=not with_ui):
+    backend_pid = None
+    with _spinner("waiting for the backend"):
+        while time.monotonic() < deadline:
+            status, _ = getter(f"{codexify.HEALTH_BACKEND}/ping", 3.0)
+            backend_pid = _child_pid(install, "backend")
+            if status == 200:
+                # A /ping that answers is not proof that *our* backend
+                # answered: a stale process left on the port answers just as
+                # well, and it answers the health checks too. Waiting cannot
+                # fix that — this install's backend will never get the port
+                # — so the readiness report below names the holder instead.
+                break
+            time.sleep(1.0)
+    with _spinner("checking the stack"):
+        rows = codexify.readiness(install, runner=runner,
+                                  http_getter=getter,
+                                  skip_docker=True,
+                                  skip_frontend=not with_ui,
+                                  backend_pid=backend_pid,
+                                  frontend_wait=FRONTEND_WAIT,
+                                  schema_migrated=migrated)
+    for row in rows:
         report.add(row.label, row.mark, row.detail)
     for row in process_rows(install):
         report.add(row.label, row.mark, row.detail)
@@ -1006,7 +1296,8 @@ def status(install: Optional[Path], explicit: Optional[str] = None,
             report.add(row.label, row.mark, row.detail)
     for row in codexify.readiness(install, runner=runner,
                                    http_getter=http_getter or codexify._http_get,
-                                   skip_docker=True):
+                                   skip_docker=True,
+                                   backend_pid=_child_pid(install, "backend")):
         report.add(row.label, row.mark, row.detail)
     failed = [row for row in report.rows if row.mark == BAD]
     if failed:
@@ -1026,7 +1317,7 @@ def down(install: Optional[Path], explicit: Optional[str] = None) -> Report:
         report.exit_code = EXIT_MISSING_INSTALL
         report.verdict = "nothing was stopped"
         return report
-    stopped, detail = stop(install)
+    stopped, detail = _with_spinner("stopping the stack", stop, install)
     report.add("the processes", OK if stopped else BAD, detail)
     report.exit_code = EXIT_OK if stopped else EXIT_PARTIAL
     report.verdict = "the stack is down" if stopped else "the stack is still up"

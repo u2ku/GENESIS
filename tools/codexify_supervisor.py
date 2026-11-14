@@ -161,9 +161,15 @@ def main(argv=None) -> int:
 
     if args.with_ui:
         pnpm = os.environ.get("PNPM") or "pnpm"
+        # `--strictPort` makes vite fail loudly when the port is taken
+        # instead of quietly moving to the next one. A vite that moved
+        # would leave the old process serving the old interface: the
+        # health check would pass against yesterday's build and nobody
+        # would be told.
         children.append(("interface", spawn("interface", [
             pnpm, "--dir", "frontend/src", "dev",
             "--port", str(args.frontend_port),
+            "--strictPort",
         ], install, env)))
 
     stopping = {"now": False}

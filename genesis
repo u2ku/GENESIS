@@ -895,6 +895,7 @@ def _codexify_wizard(args, ctx, codexify, explicit):
 
         # -- phase 1: the code ------------------------------------------------
         if install is None:
+            print("\n  phase 1 — the code\n")
             report = codexify_install.install(ROOT, explicit=explicit,
                                              stream=True)
             _emit_codexify_report(ctx, report)
@@ -950,6 +951,7 @@ def _codexify_wizard(args, ctx, codexify, explicit):
             if launcher and not any(
                     row.label == "the launcher"
                     for row in report.rows):
+                print("\n  phase 3 — the launcher\n")
                 made, detail = codexify_native.make_launcher(
                     install, launcher)
                 _emit_codexify_report(ctx, codexify.Report(

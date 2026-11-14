@@ -103,6 +103,8 @@ PROFILES = ("cli", "backfill", "voice")
 
 HEALTH_BACKEND = "http://127.0.0.1:8888"
 HEALTH_FRONTEND = "http://127.0.0.1:5173/"
+BACKEND_PORT = 8888
+FRONTEND_PORT = 5173
 
 
 @dataclass(frozen=True)
@@ -291,6 +293,97 @@ def _http_get(url: str, timeout: float = 3.0) -> tuple[int, str]:
         return exc.code, exc.read().decode("utf-8", "replace")
     except Exception as exc:
         return 0, str(exc)
+
+
+# ---------------------------------------------------------------- the machine --
+
+def pid_alive(pid: int) -> bool:
+    """Is this pid a process that can still do something?
+
+    `os.kill(pid, 0)` asks the kernel whether a signal could be delivered,
+    and a zombie answers yes. A zombie is a process that has already died
+    and is only waiting to be reaped: it holds no port, answers no
+    request, and cannot be stopped. Treating one as alive is how a
+    wizard reports a backend that died two minutes ago as running.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # someone else's process, but a live one
+    except OSError:
+        return False
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """Has this pid died without being reaped?"""
+    try:
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.stdout.strip().startswith("Z")
+
+
+def port_holder(port: int) -> Optional[int]:
+    """The pid listening on a TCP port, if something is.
+
+    A port is the truth about who is serving. A pid file is a claim: it
+    can point at a process that died, a process that lost the race for
+    the port, or a process belonging to a different installation
+    entirely — an install that was moved to the trash while its
+    supervisor kept the socket open.
+    """
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in result.stdout.split():
+        try:
+            return int(line)
+        except ValueError:
+            continue
+    return None
+
+
+def process_cwd(pid: int) -> Optional[str]:
+    """The working directory of a pid, if it can be read.
+
+    This is how a squatter on a port is identified: the working
+    directory is the installation it belongs to.
+    """
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("n"):
+            return line[1:].strip() or None
+    return None
+
+
+def wait_for_url(url: str, getter: HttpGetter,
+                 timeout: float) -> tuple[int, str]:
+    """Poll a URL until it answers 200, or the patience runs out.
+
+    A dev server that is still booting is not a broken server. Vite
+    resolves its dependency graph before it binds, and `--force` makes it
+    do that from scratch on every start — seconds, not milliseconds. A
+    single probe fired at a fixed point in a sequence measures the boot,
+    not the server, and reports a working interface as broken.
+    """
+    deadline = time.monotonic() + timeout
+    status, body = getter(url, 3.0)
+    while status != 200 and time.monotonic() < deadline:
+        time.sleep(0.5)
+        status, body = getter(url, 3.0)
+    return status, body
 
 
 # ------------------------------------------------------------------ masking --
@@ -809,6 +902,9 @@ def readiness(install: Path, *, runner: CommandRunner = _run_command,
               docker_bin: Optional[str] = None,
               skip_docker: bool = False,
               skip_frontend: bool = False,
+              backend_pid: Optional[int] = None,
+              frontend_wait: float = 0.0,
+              schema_migrated: bool = False,
               ) -> list[Row]:
     """What is true about this installation right now.
 
@@ -826,6 +922,15 @@ def readiness(install: Path, *, runner: CommandRunner = _run_command,
 
     `skip_docker` is for the native path, where there is no Docker and no
     compose file to resolve, and where saying so would be a false row.
+
+    `backend_pid` is the pid the caller started. When it is given, the
+    health checks below are only reported if that process is the one
+    holding the port — a report that describes a different stack is
+    worse than no report.
+
+    `frontend_wait` is how long the interface is given to finish booting.
+    Zero is a single probe, which is right for a snapshot of a stack that
+    is already up, and wrong for the moment a stack is being brought up.
     """
     rows: list[Row] = []
     env_path = install / ENV_FILE
@@ -897,18 +1002,49 @@ def readiness(install: Path, *, runner: CommandRunner = _run_command,
     # schema landed, which is the difference between a container that started
     # and a database that migrated.
     status, _ = http_getter(f"{HEALTH_BACKEND}/ping", 3.0)
-    if status == 200:
-        rows.append(Row("the backend", OK, "answers /ping"))
-    else:
+    if status != 200:
         rows.append(Row("the backend", BAD,
                         "not answering — it has not started, or it has not "
                         "finished starting"))
         return rows
 
+    # A /ping that answers is not proof that *our* backend answered. A
+    # stale process left on the port — an install that was moved to the
+    # trash while its supervisor kept the socket, or a backend from a run
+    # that lost the race for it — answers just as well, and answers the
+    # health checks too, so the report below would describe yesterday's
+    # stack while this one is still starting. The check that matters is
+    # whose process is on the port.
+    if backend_pid is not None:
+        holder = port_holder(BACKEND_PORT)
+        if holder is not None and holder != backend_pid:
+            elsewhere = process_cwd(holder) or "another installation"
+            rows.append(Row("the backend", BAD,
+                            f"the port :{BACKEND_PORT} is held by pid "
+                            f"{holder} ({elsewhere}), not by this install's "
+                            f"backend (pid {backend_pid}) — every health "
+                            "check below would be that process's, not this "
+                            "install's"))
+            return rows
+    rows.append(Row("the backend", OK, "answers /ping"))
+
     status, body = http_getter(f"{HEALTH_BACKEND}/healthz", 3.0)
     if status == 200:
         missing_tables = _missing_tables(body)
-        if missing_tables:
+        if missing_tables and schema_migrated:
+            # The backend's own table check says the tables are missing,
+            # but this run migrated and seeded them: alembic reached
+            # heads and the seed inserted a default project, which needs
+            # the table it says is not there. The backend logs its own
+            # check as failed, and a check that failed is not a finding
+            # about the schema. The migration is the evidence; the
+            # diagnostic is the thing that is broken.
+            rows.append(Row("the schema", OK,
+                            "the tables are there — the migration and the "
+                            "seed both landed, and the backend's own table "
+                            "check errored (it says "
+                            + ", ".join(missing_tables) + ")"))
+        elif missing_tables:
             rows.append(Row("the schema", BAD,
                             "migrations did not land: " + ", ".join(missing_tables)))
         else:
@@ -952,7 +1088,7 @@ def readiness(install: Path, *, runner: CommandRunner = _run_command,
     # the interface is a convenience started only when asked for. A machine
     # that never started it has not failed.
     if not skip_frontend:
-        status, _ = http_getter(HEALTH_FRONTEND, 5.0)
+        status, _ = wait_for_url(HEALTH_FRONTEND, http_getter, frontend_wait)
         if status == 200:
             rows.append(Row("the interface", OK, "serving on :5173"))
         else:
