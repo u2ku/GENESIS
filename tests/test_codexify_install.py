@@ -327,7 +327,51 @@ class LauncherCase(unittest.TestCase):
         bundle = self.fake_home / "Desktop" / "Codexify.app"
         script = (bundle / "Contents" / "MacOS" / "Codexify").read_text()
         self.assertIn("codexify setup", script)
-        self.assertIn("127.0.0.1:8888", script)
+
+    def test_the_launcher_opens_the_interface_not_the_api(self):
+        """The app is on 5173; 8888 is the API behind it.
+
+        A launcher that opens the API lands a person on a JSON endpoint.
+        The interface is what this launcher is for, so that is what it
+        opens — and what it waits for, because vite does not answer the
+        moment it starts.
+        """
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        bundle = self.fake_home / "Desktop" / "Codexify.app"
+        script = (bundle / "Contents" / "MacOS" / "Codexify").read_text()
+        opened = [line.strip() for line in script.splitlines()
+                  if line.strip().startswith("open ")]
+        # The interface is what is opened first.
+        self.assertEqual(opened[0], "open http://127.0.0.1:5173")
+        # The API is only a fallback, for an interface that never came up.
+        self.assertEqual(opened[-1], "open http://127.0.0.1:8888")
+        self.assertEqual(len(opened), 2)
+
+    def test_the_launcher_starts_the_stack_with_the_interface(self):
+        """The interface it opens has to be the interface it starts.
+
+        A setup without `--with-ui` brings up the API and leaves the
+        interface down, and then the launcher waits for an interface
+        that was never asked for.
+        """
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        bundle = self.fake_home / "Desktop" / "Codexify.app"
+        script = (bundle / "Contents" / "MacOS" / "Codexify").read_text()
+        self.assertIn("codexify setup --with-ui", script)
+
+    def test_the_launcher_waits_for_the_interface_before_opening(self):
+        """One probe measures the boot, not the server."""
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        bundle = self.fake_home / "Desktop" / "Codexify.app"
+        script = (bundle / "Contents" / "MacOS" / "Codexify").read_text()
+        self.assertIn("127.0.0.1:5173", script)
+        self.assertIn("sleep 1", script)
 
     def test_the_launcher_refuses_an_unknown_place(self):
         made, detail = native.make_launcher(self.install_dir, "garage")

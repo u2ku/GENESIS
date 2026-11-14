@@ -1331,9 +1331,25 @@ LAUNCHER_ID = "com.genesis.codexify"
 LAUNCHER_SCRIPT = """#!/bin/bash
 # Made by `genesis codexify setup --with-launcher`. The stack is started
 # only if it is not answering; a stack that is up is left alone.
-if ! curl -s -o /dev/null --max-time 2 http://127.0.0.1:8888/ping; then
-  "$GENESIS" codexify setup >> "$LOG" 2>&1
+#
+# The interface is the thing this launcher is for, so the interface is
+# what it asks about and what it starts -- with the interface, not the
+# API. Opening the API would land a person on a JSON endpoint, which is
+# not the app they came to open.
+if ! curl -s -o /dev/null --max-time 2 http://127.0.0.1:5173/; then
+  "$GENESIS" codexify setup --with-ui >> "$LOG" 2>&1
 fi
+# On a cold start the interface takes a moment to bind -- vite resolves
+# its dependency graph before it will answer -- so it is waited for
+# rather than judged on the first probe. The API is the fallback: it is
+# what is guaranteed to answer.
+for _ in {1..20}; do
+  if curl -s -o /dev/null --max-time 2 http://127.0.0.1:5173/; then
+    open http://127.0.0.1:5173
+    exit 0
+  fi
+  sleep 1
+done
 open http://127.0.0.1:8888
 """
 
