@@ -1,4 +1,4 @@
 [submodule "codexify-core"]
 	path = codexify-core
-	url = https://github.com/Resonant-Jones/Codexify-Core.git
+	url = https://github.com/Resonant-Jones/Codexify.git
 	branch = main

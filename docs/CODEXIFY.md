@@ -21,10 +21,12 @@ itself is built (`src/codexify.py`); the docs are the contract it keeps.
 Codexify lives in the `codexify-core/` git submodule, pinned by the parent
 repository.
 
-> **The submodule is an archive.** Its own README says the repository "is
-> maintained as a read-only archive" and that active development has moved
-> elsewhere. It is still what ships with GENESIS, and it is still what
-> `genesis codexify` provisions, but it is not the live upstream.
+> **The submodule is the live upstream.** It pins Resonant-Jones/Codexify
+> at its current `main` (0fd3d62), so a fresh `git clone --recurse-submodules`
+> gives consumers the same tree the developers build against. The earlier
+> repository (Resonant-Jones/Codexify-Core) is now a read-only archive; this
+> commit switches the submodule to its successor so consumers do not clone
+> an increasingly stale tree.
 
 **A plain clone leaves `codexify-core/` empty.** It is a submodule, and
 `git clone` without `--recurse-submodules` gives you an empty directory. An
