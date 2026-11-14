@@ -195,17 +195,11 @@ def detect_profile() -> dict:
     else:
         profile = "unsupported"
 
-    if profile == "macos":
-        package_manager = "brew" if _which("brew") else ""
-    elif is_arch:
-        package_manager = "pacman"
-    elif _which("apt-get"):
-        package_manager = "apt"
-    else:
-        package_manager = ""
-
-    daemon_kind = "systemd-user" if profile in ("omarchy", "arch") \
-        else ("launchd-agent" if profile == "macos" else "")
+    # The package manager and the daemon substrate are the contract
+    # module's business: the wizard and the landing path must agree on
+    # both, and there is one answer between them.
+    package_manager = node.package_manager()
+    daemon_kind = node.daemon_kind()
 
     js_runtime = None
     for candidate in ("node", "bun", "deno"):
@@ -471,21 +465,46 @@ def _aggressive_actions(ctx, profile: dict) -> list:
              f"install via {profile.get('package_manager') or 'the system package manager'} — never a vendored binary"))
 
     if not ctx.no_daemon:
-        unit = _daemon_unit_path(profile)
+        kind = profile.get("daemon_kind") or ""
+        unit = node.daemon_unit_path(kind)
+        content = node.daemon_unit_content(kind, HERE / "node_daemon.py", ROOT)
+        # The unit is written by a COMMAND, not as a file action: the
+        # contract module owns the rule that a unit which is not ours is
+        # never overwritten, and a file action would put the wizard's
+        # ownership guard in the way of the landing path that wrote it.
         actions.append(_action(
-            "node-daemon", "file", unit,
+            "node-daemon", "command", unit,
             {"present": True}, {"present": unit.exists()},
-            "none" if unit.exists() else "create",
-            content=_daemon_unit_content(ctx, profile)))
+            _file_effect(unit, content),
+            content=content,
+            note="the node's heartbeat daemon, as a user service"))
+        running = bool(node.daemon_state(unit).get("running"))
+        actions.append(_action(
+            "node-daemon-enable", "command", unit,
+            {"running": True}, {"running": running},
+            "none" if running else "enable",
+            note="the node's heartbeat daemon, as a user service"))
 
     if not ctx.no_tailscale:
-        actions.append(_action(
-            "tailnet-join", "probe", "tailnet",
-            {"joined": True},
-            {"joined": _tailscale_joined()},
-            "none" if _tailscale_joined() else "manual",
-            note="the auth key is read from a file, and passed as "
-                 "--auth-key=file:<path> — the value never enters an argument"))
+        key = (Path(ctx.tailnet_auth_key_path)
+               if ctx.tailnet_auth_key_path else None)
+        if key is not None and key.exists():
+            # The join is in the PLAN, so it is covered by the receipt the
+            # operator approved — not a step that happens after the plan
+            # was applied, outside it.
+            joined = bool(node.tailscale_status().get("running"))
+            actions.append(_action(
+                "tailnet-join", "command", "tailnet",
+                {"joined": True}, {"joined": joined},
+                "none" if joined else "join",
+                note="the auth key is read from a file, and passed as "
+                     "--auth-key=file:<path> — the value never enters an argument"))
+        else:
+            actions.append(_action(
+                "tailnet-join", "probe", "tailnet",
+                {"joined": True}, {"joined": False},
+                "manual",
+                note="no tailnet auth key file — the wizard establishes that secret"))
 
     actions.append(_action(
         "readiness", "probe", "readiness",
@@ -650,7 +669,17 @@ def _shim_unit_content(ctx) -> str:
 # --------------------------------------------------------------- the content --
 
 def _node_profile_content(ctx, profile: dict) -> str:
-    data = {
+    """The node profile, with the wizard's keys set and everything else kept.
+
+    The profile is a machine-local file that more than one thing writes: the
+    wizard owns the keys below, and the node contract owns the tailnet
+    record it writes when a join succeeds. So the file starts from what is
+    already there and the wizard's keys are set on top — a wizard run must
+    never delete a key it does not own, or the node silently stops doing the
+    thing that key was for.
+    """
+    data = node.node_profile(node_profile_path())
+    data.update({
         "node": ctx.node,
         "profile": profile.get("profile"),
         "arch": profile.get("arch"),
@@ -658,7 +687,7 @@ def _node_profile_content(ctx, profile: dict) -> str:
         "substrate_kind": ("shim" if _is_shim_base(ctx)
                            else "gateway"),
         "schema": 1,
-    }
+    })
     if ctx.provider:
         data["provider"] = ctx.provider
         data["provider_env_var"] = ctx.provider_env_var
@@ -666,7 +695,9 @@ def _node_profile_content(ctx, profile: dict) -> str:
     if ctx.key_fingerprint:
         data["key_fingerprint"] = ctx.key_fingerprint
     if ctx.tailnet:
-        data["tailnet"] = ctx.tailnet
+        tailnet = dict(data.get("tailnet") or {})
+        tailnet.update(ctx.tailnet)
+        data["tailnet"] = tailnet
     return json.dumps(data, indent=2, sort_keys=True) + "\n"
 
 
@@ -798,49 +829,6 @@ def _codexify_env_content(ctx) -> str:
     return _set_env_line(text, "OPENAI_API_KEY", ctx.key_value)
 
 
-def _daemon_unit_path(profile: dict) -> Path:
-    if profile.get("daemon_kind") == "launchd-agent":
-        return Path.home() / "Library" / "LaunchAgents" / "dev.genesis.node.plist"
-    return Path.home() / ".config" / "systemd" / "user" / "genesis-node.service"
-
-
-def _daemon_unit_content(ctx, profile: dict) -> str:
-    daemon = HERE / "node_daemon.py"
-    if profile.get("daemon_kind") == "launchd-agent":
-        return (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-            '<plist version="1.0">\n'
-            "<dict>\n"
-            "  <key>Label</key>\n"
-            "  <string>dev.genesis.node</string>\n"
-            "  <key>ProgramArguments</key>\n"
-            "  <array>\n"
-            f"    <string>{sys.executable}</string>\n"
-            f"    <string>{daemon}</string>\n"
-            "  </array>\n"
-            "  <key>RunAtLoad</key>\n"
-            "  <true/>\n"
-            "  <key>KeepAlive</key>\n"
-            "  <true/>\n"
-            "  <key>WorkingDirectory</key>\n"
-            f"  <string>{ROOT}</string>\n"
-            "</dict>\n"
-            "</plist>\n")
-    return (
-        "[Unit]\n"
-        "Description=GENESIS node — the heartbeat daemon\n"
-        "\n"
-        "[Service]\n"
-        "ExecStart=%s %s\n"
-        "Restart=on-failure\n"
-        "RestartSec=30\n"
-        "\n"
-        "[Install]\n"
-        "WantedBy=default.target\n" % (sys.executable, daemon))
-
-
 def _env_has(path: Path, name: str) -> bool:
     if not path.exists():
         return False
@@ -877,22 +865,6 @@ def _claude_version() -> str:
         return ""
 
 
-def _tailscale_joined() -> bool:
-    if not _which("tailscale"):
-        return False
-    try:
-        out = subprocess.run(["tailscale", "status", "--json"],
-                             capture_output=True, text=True, timeout=20)
-        if out.returncode != 0:
-            return False
-        data = json.loads(out.stdout or "{}")
-        return bool(data.get("BackendState") == "Running")
-    except Exception:
-        return False
-
-
-# ------------------------------------------------------------------ the plan --
-
 def plan_is_empty(actions: list) -> bool:
     return all(a.get("effect") == "none" for a in actions)
 
@@ -918,7 +890,11 @@ def render_diff(actions: list) -> None:
     """The unified diff. Placeholders, never values."""
     for action in actions:
         if action.get("kind") not in ("file", "symlink"):
-            continue
+            # A command that WRITES a file still shows its diff: the unit
+            # is written by a command now, and a dry run that did not show
+            # it would be a dry run that lied.
+            if action.get("kind") != "command" or not action.get("content"):
+                continue
         if action.get("effect") == "none":
             continue
         target = Path(action.get("target", ""))
@@ -1246,82 +1222,26 @@ def _run_command(ctx, action: dict) -> tuple:
             return False, "the native installer did not finish"
         return True, "installed"
     if action.get("id") == "tailscale":
-        return _install_tailscale()
+        result = node.install_tailscale()
+        return result["installed"], result["detail"]
     if action.get("id") == "node-daemon":
+        result = node.install_daemon_unit(
+            action.get("content") or "", Path(action.get("target", "")))
+        return result["ok"], result["detail"]
+    if action.get("id") == "node-daemon-enable":
         if ctx.no_start:
             return True, "written, not started (--no-start)"
-        return _enable_daemon(action.get("target", ""))
+        return node.enable_daemon(Path(action.get("target", "")))
+    if action.get("id") == "tailnet-join":
+        return join_tailnet(ctx)
     if action.get("id") == "shim-enable":
         if ctx.no_start:
             return True, "written, not started (--no-start)"
-        return _enable_daemon(action.get("target", ""))
-    return True, ""
-
-
-def _install_tailscale() -> tuple:
-    """Tailscale, installed by the system package manager. Never vendored."""
-    if _which("tailscale"):
-        return True, "already installed"
-    if shutil.which("pacman"):
-        commands = [["sudo", "pacman", "-S", "--needed", "--noconfirm", "tailscale"]]
-    elif shutil.which("brew"):
-        commands = [["brew", "install", "--cask", "tailscale"]]
-    elif shutil.which("apt-get"):
-        commands = [["sudo", "apt-get", "install", "-y", "tailscale"]]
-    else:
-        return False, "no known package manager — install Tailscale by hand"
-    for command in commands:
-        try:
-            result = subprocess.run(command, capture_output=True, text=True,
-                                    timeout=900)
-        except Exception as exc:
-            return False, f"{type(exc).__name__}: {exc}"
-        if result.returncode != 0:
-            return False, f"{' '.join(command)} failed: {(result.stderr or '').strip()[:200]}"
-    return True, "installed"
-
-
-def _enable_daemon(unit: str) -> tuple:
-    """Start the heartbeat daemon as a *user* service. Never a system one."""
-    unit_path = Path(unit)
-    if unit_path.suffix == ".plist":
-        label = unit_path.stem
-        domain = f"gui/{os.getuid()}/{label}"
-        # A job with this label may already be registered — from an earlier
-        # onboarding, or from a test that installed one. `launchctl load`
-        # on a taken label prints "Load failed" and RETURNS 0, so the old
-        # job would keep the label and the plist we just wrote would be
-        # ignored: the wizard would report a service it never started.
-        # So take the label first, and then CHECK that the job now
-        # registered is the file we wrote.
-        subprocess.run(["launchctl", "bootout", domain],
-                       capture_output=True, text=True, timeout=60)
-        # The bootout is ASYNCHRONOUS: launchd releases the label a moment
-        # later, and a load issued in that window still finds it taken. So
-        # wait for the label to actually be free before loading into it.
-        for _ in range(40):
-            if subprocess.run(["launchctl", "print", domain],
-                              capture_output=True, text=True,
-                              timeout=60).returncode != 0:
-                break
-            time.sleep(0.25)
-        result = subprocess.run(["launchctl", "load", "-w", str(unit_path)],
-                                capture_output=True, text=True, timeout=120)
-        stderr = (result.stderr or "").strip()
-        if result.returncode != 0 or "Load failed" in stderr:
-            return False, stderr[:200]
-        registered = subprocess.run(["launchctl", "print", domain],
-                                    capture_output=True, text=True, timeout=60)
-        if str(unit_path.resolve()) not in (registered.stdout or ""):
-            return False, (f"{label} did not take: it is registered from "
-                           f"somewhere else")
-        return True, "loaded"
-    result = subprocess.run(["systemctl", "--user", "enable", "--now",
-                             unit_path.name],
-                            capture_output=True, text=True, timeout=120)
-    if result.returncode != 0:
-        return False, (result.stderr or "").strip()[:200]
-    return True, "enabled"
+        return node.enable_daemon(Path(action.get("target", "")))
+    # An action this runner does not know is a FAILURE, not a success.
+    # The plan is full of command actions now, and a silent (True, "")
+    # here is the false success this project exists to kill.
+    return False, f"unknown action: {action.get('id')!r}"
 
 
 # --------------------------------------------------------------- the wizard --
@@ -1724,8 +1644,11 @@ def readiness(ctx) -> list:
         mark = False
     rows.append(("genesis check", mark, verdict.strip()))
 
+    # `--readiness-only` changes NOTHING on this machine: no install, no
+    # unit, no service, no join. A readiness probe that installed things
+    # would be a probe that changed the thing it measured.
     result = subprocess.run([sys.executable, str(ROOT / "genesis"), "--plain",
-                             "landing", str(ROOT), "--no-join"],
+                             "landing", str(ROOT), "--readiness-only"],
                             capture_output=True, text=True, cwd=str(ROOT))
     rows.append(("genesis landing", result.returncode == 0,
                  "the node reports readiness"))
@@ -1992,10 +1915,6 @@ def run(ctx) -> int:
             say(f"  ✗ {action.get('id'):<22} {why}")
         for action in manual:
             say(f"  · manual   {action.get('id'):<22} {action.get('note', '')}")
-
-        if ctx.wizard and ctx.tailnet_auth_key_path:
-            joined, detail = join_tailnet(ctx)
-            say(f"  {'✓' if joined else '✗'} tailnet     {detail}")
 
         say("")
         say(f"  {len(applied)} actions applied"

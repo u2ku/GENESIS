@@ -30,6 +30,13 @@ enable path can be walked honestly — including the case the real
 launchctl hides, where a load onto a label that is already taken prints
 "Load failed" and **returns 0**.
 
+The docker stub is a **fake docker**, and it is the fourth thing in this
+file for the same reason as the other three. `docker compose up -d
+--build` starts twenty-odd containers and pulls gigabytes; a unit test
+must never be able to do that, and must never depend on a daemon being
+installed at all. It remembers every invocation, so a test can assert
+the exact command that was built.
+
 Nothing here changes what the wizard does for a real operator. It only
 stops a unit test from doing what an operator would do.
 """
@@ -49,7 +56,13 @@ exit 0
 
 # The Tailscale stub answers `status --json` with nothing useful, so the
 # probe sees an installed-but-not-running tailnet and never the real one.
+#
+# It also REMEMBERS every invocation, so a test can prove that no
+# `tailscale up` ever ran on the machine the suite runs on.
 _TAILSCALE = """#!/bin/sh
+if [ -n "$GENESIS_STUB_TAILSCALE_STATE" ]; then
+  printf '%s\n' "$*" >> "$GENESIS_STUB_TAILSCALE_STATE"
+fi
 if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
   echo '{"BackendState":"Stopped"}'
 fi
@@ -164,6 +177,94 @@ if verb == "list":
 sys.exit(0)
 '''
 
+# The docker stub is a FAKE docker, for the same reason the launchctl stub is
+# a fake launchd. `docker compose up -d --build` starts twenty-odd
+# containers; a unit test must never be able to do that, and must never
+# depend on a daemon being installed at all.
+#
+# It remembers every invocation, so a test can assert the exact command the
+# wizard built — that the `--env-file` is there, that the service list is
+# the one it should be.
+#
+# The modes reproduce the ways a real docker says no:
+#   GENESIS_STUB_DOCKER_MODE=no-daemon    `docker info` fails — the daemon
+#       is not running.
+#   GENESIS_STUB_DOCKER_MODE=no-compose   `docker compose version` fails —
+#       the compose plugin is not there.
+#   GENESIS_STUB_DOCKER_MODE=bad-config   `docker compose config` fails —
+#       the compose file does not resolve.
+#   GENESIS_STUB_DOCKER_MODE=up-fails     `docker compose up` fails.
+_DOCKER = r'''#!/usr/bin/env python3
+"""A docker that starts nothing, and remembers what it was told."""
+import os
+import sys
+
+STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     ".docker-state")
+MODE = os.environ.get("GENESIS_STUB_DOCKER_MODE", "")
+
+
+def record(line):
+    try:
+        with open(STATE, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+
+
+args = sys.argv[1:]
+record("\t".join(args))
+
+if not args:
+    sys.exit(0)
+
+verb = args[0]
+rest = args[1:]
+
+if verb in ("--version", "version"):
+    print("Docker version 27.0.0, build stub")
+    sys.exit(0)
+
+if verb == "info":
+    if MODE == "no-daemon":
+        sys.stderr.write("Cannot connect to the Docker daemon.\n")
+        sys.exit(1)
+    print("Server Version: stub")
+    sys.exit(0)
+
+if verb == "compose":
+    sub = rest[0] if rest else ""
+    if sub == "version":
+        if MODE == "no-compose":
+            sys.stderr.write("docker: 'compose' is not a docker command.\n")
+            sys.exit(1)
+        print("Docker Compose version v2.29.0-stub")
+        sys.exit(0)
+    if sub == "config":
+        if MODE == "bad-config":
+            sys.stderr.write("services.backend: required variable "
+                             "GUARDIAN_API_KEY is missing\n")
+            sys.exit(1)
+        sys.exit(0)
+    if sub == "up":
+        if MODE == "up-fails":
+            sys.stderr.write("failed to build: service 'backend'\n")
+            sys.exit(1)
+        sys.exit(0)
+    if sub == "down":
+        sys.exit(0)
+    if sub == "volume":
+        # `volume ls --format {{.Name}}` — the readiness check looks for a
+        # volume that already holds data.
+        sys.exit(0)
+    sys.exit(0)
+
+if verb == "volume":
+    sys.exit(0)
+
+sys.exit(0)
+'''
+
 
 def stub_cli_on_path(directory: Path) -> str | None:
     """Stub the CLI, Tailscale and launchctl onto PATH.
@@ -177,9 +278,62 @@ def stub_cli_on_path(directory: Path) -> str | None:
         stub = directory / name
         stub.write_text(body, encoding="utf-8")
         stub.chmod(0o755)
+    os.environ["GENESIS_STUB_TAILSCALE_STATE"] = str(
+        directory / ".tailscale-state")
     previous = os.environ.get("PATH")
     os.environ["PATH"] = str(directory) + os.pathsep + (previous or "")
     return previous
+
+
+def tailscale_calls(directory: Path) -> list[list[str]]:
+    """Every invocation the tailscale stub was given, in order.
+
+    A test uses this to prove that `tailscale up` never ran on the
+    machine the suite is running on.
+    """
+    state = directory / ".tailscale-state"
+    if not state.is_file():
+        return []
+    out = []
+    for line in state.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            out.append(line.split())
+    return out
+
+
+def stub_docker_on_path(directory: Path) -> str | None:
+    """Stub docker onto PATH.
+
+    Kept apart from `stub_cli_on_path` on purpose: whether docker is present
+    at all is one of the things a test has to control, so a test that wants
+    the "docker is missing" branch has to be able to leave it off PATH.
+
+    Returns the previous value of PATH, so the caller can put it back
+    exactly as it was.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    stub = directory / "docker"
+    stub.write_text(_DOCKER, encoding="utf-8")
+    stub.chmod(0o755)
+    previous = os.environ.get("PATH")
+    os.environ["PATH"] = str(directory) + os.pathsep + (previous or "")
+    return previous
+
+
+def docker_calls(directory: Path) -> list[list[str]]:
+    """Every invocation the docker stub was given, in order.
+
+    Each entry is the argument list, so a test can assert the exact command
+    the wizard built.
+    """
+    state = directory / ".docker-state"
+    if not state.is_file():
+        return []
+    out = []
+    for line in state.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            out.append(line.split("\t"))
+    return out
 
 
 def restore_path(previous: str | None) -> None:
@@ -188,3 +342,85 @@ def restore_path(previous: str | None) -> None:
         os.environ.pop("PATH", None)
     else:
         os.environ["PATH"] = previous
+
+
+# The SYSTEM stubs — sudo, brew, pacman, apt-get, systemctl. Kept apart
+# from the CLI stubs above for the same reason the docker stub is: whether
+# a package manager is present at all is one of the things a test has to
+# control.
+#
+# The landing path installs Tailscale with the system package manager,
+# and it may run `sudo`. A unit test must never be able to install a
+# system package, and it must never be able to open a password prompt on
+# the machine it runs on — so `sudo -n true` FAILS here, which is exactly
+# the case the contract turns into a manual step.
+#
+# They remember every invocation, so a test can prove what was NOT run.
+_SYSTEM = r'''#!/usr/bin/env python3
+"""A refusing stub. It records and it says no."""
+import os
+import sys
+
+name = os.path.basename(sys.argv[0])
+state = os.environ.get("GENESIS_STUB_SYSTEM_STATE", "")
+if state:
+    with open(state, "a", encoding="utf-8") as handle:
+        handle.write(name + "\t" + "\t".join(sys.argv[1:]) + "\n")
+
+if name == "sudo":
+    # `sudo -n true` is how a tool asks "is sudo usable without a
+    # password?". The answer here is no, so the step becomes a manual one
+    # and the operator is handed the command.
+    if "-n" in sys.argv and "true" in sys.argv:
+        sys.stderr.write("sudo: a password is required\n")
+        sys.exit(1)
+    sys.stderr.write("sudo: a password is required\n")
+    sys.exit(1)
+
+if name == "systemctl":
+    if "is-active" in sys.argv:
+        sys.stdout.write("inactive\n")
+        sys.exit(3)
+    if "enable" in sys.argv:
+        sys.exit(0)
+    sys.exit(1)
+
+# brew, pacman, apt-get: the install must never happen.
+sys.stderr.write(name + ": refusing to install anything in a test\n")
+sys.exit(1)
+'''
+
+_SYSTEM_NAMES = ("sudo", "brew", "pacman", "apt-get", "systemctl")
+
+
+def stub_system_on_path(directory: Path) -> str | None:
+    """Stub the system commands onto PATH.
+
+    Returns the previous value of PATH, so the caller can put it back
+    exactly as it was.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in _SYSTEM_NAMES:
+        stub = directory / name
+        stub.write_text(_SYSTEM, encoding="utf-8")
+        stub.chmod(0o755)
+    os.environ["GENESIS_STUB_SYSTEM_STATE"] = str(directory / ".system-state")
+    previous = os.environ.get("PATH")
+    os.environ["PATH"] = str(directory) + os.pathsep + (previous or "")
+    return previous
+
+
+def system_calls(directory: Path) -> list[list[str]]:
+    """Every invocation the system stubs were given, in order.
+
+    Each entry is the argument list, so a test can assert that no
+    package manager was ever run.
+    """
+    state = directory / ".system-state"
+    if not state.is_file():
+        return []
+    out = []
+    for line in state.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            out.append(line.split("\t"))
+    return out

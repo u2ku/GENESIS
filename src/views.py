@@ -92,6 +92,7 @@ _GROUPS = [
         ("genesis card", "Genesis's character card"),
         ("genesis prompt", "the chat prompt — editable, and live when written"),
         ("genesis tools", "what he can run"),
+        ("genesis codexify", "the Codexify install — provisioned and verified"),
     ]),
     ("IDENTITY", [
         ("genesis id", "the identity constant, bare"),
@@ -463,13 +464,14 @@ def landing_node(style, path: str, checks, ready: bool, note: str) -> str:
     return "\n".join(out)
 
 
-def landing_join(style, rows) -> str:
-    """The tailnet — the connective layer, and what the join actually did.
+def landing_setup(style, rows) -> str:
+    """The setup: what this machine became, and what it did not.
 
     A step that needs a human is marked with a middot rather than a cross:
-    it is not a failure, it is a hand-off.
+    it is not a failure, it is a hand-off. And a row is ✓ only when
+    something proved it — never because the plan intended it.
     """
-    out = [style.heading("TAILNET", "the connective layer"), ""]
+    out = [style.heading("SETUP", "this machine as a node"), ""]
     for label, mark, detail in rows:
         out.append(_row(style, mark, label, detail, 22))
     return "\n".join(out)
@@ -519,3 +521,34 @@ def document(style, title: str, right: str | None, header, parts) -> str:
         else:
             out.append("  " + text)
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------- codexify --
+
+def codexify_report(style, heading: str, rows, verdict: str,
+                    exit_code: int = 0) -> str:
+    """The Codexify report: what was checked, and what was found.
+
+    The verdict is coloured by the **exit code**, not by its first word. A
+    sentence is prose, and prose can start with "nothing" whether it means
+    "nothing was found" (a failure) or "nothing is wrong" (a success). The
+    exit code is the fact; the sentence is only its description.
+
+    A row that reports a write says only what it wrote. Readiness is claimed
+    only by a row that made a request.
+    """
+    out = [style.heading(heading, "the vendored install"), ""]
+    for label, mark, detail in rows:
+        out.append(_row(style, mark, label, detail, 22))
+    out.append("")
+    if exit_code == 0:
+        painted = style.good(verdict)
+    elif exit_code in (3, 5):
+        # Not set up yet — grey, the way `check` paints a machine that has
+        # not been provisioned. Red would say "broken", and it is not.
+        painted = style.soft(verdict)
+    else:
+        painted = style.bad(verdict)
+    out.append("  " + painted)
+    return "\n".join(out)
+

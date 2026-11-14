@@ -9,6 +9,8 @@ not.
 """
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import subprocess
 import sys
 import unittest
@@ -82,9 +84,13 @@ class TestNoColourInAPipe(unittest.TestCase):
     """A pipe is not a terminal, so nothing is painted."""
 
     def test_no_command_emits_escape_codes(self):
+        # `landing` runs in its readiness-only mode here. Without that flag
+        # it is the AGGRESSIVE path: it installs Tailscale, writes and
+        # starts a service, and joins the tailnet — on the machine the
+        # suite runs on. A test must never do that.
         for args in (("check",), ("guardrail",), ("symbols",), ("algebra",),
                      ("help",), ("stamp",), ("shield", "10001101", "10000111"),
-                     ("handoff",), ("landing", str(ROOT))):
+                     ("handoff",), ("landing", str(ROOT), "--readiness-only")):
             code, out, _ = cli(*args)
             self.assertNotIn("\033[", out, f"{args} painted a pipe")
             self.assertEqual(code, 0, f"{args} failed")
@@ -114,6 +120,36 @@ class TestViews(unittest.TestCase):
         for group in ("THE DOOR", "IDENTITY", "ENGINE", "GUARDRAILS",
                       "DOCUMENTS", "PHRASES THAT OPEN", "FLAGS"):
             self.assertIn(group, text)
+
+    def test_every_registered_command_is_in_the_help(self):
+        """The help screen and the command registry are two sources of truth.
+
+        This is PORTABILITY finding F11. `genesis landing` was registered and
+        documented and invisible in `--help`, because the dispatch table and
+        the help screen were written separately and nothing connected them.
+        A command added to one and not the other does the same thing again.
+
+        So the rule is now a test: every command the CLI can run is on the
+        help screen.
+
+        `help` is the one exception, and it is spelled `--help` in the FLAGS
+        section, which is where a reader looks for it.
+        """
+        loader = importlib.machinery.SourceFileLoader(
+            "genesis_cli", str(ROOT / "genesis"))
+        spec = importlib.util.spec_from_loader("genesis_cli", loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["genesis_cli"] = module
+        loader.exec_module(module)
+
+        listed = [command for _title, rows in views._GROUPS
+                  for command, _summary in rows]
+        for name in module.COMMANDS:
+            if name == "help":
+                continue
+            self.assertTrue(
+                any(f"genesis {name}" in command for command in listed),
+                f"genesis {name} is registered but not on the help screen")
 
     def test_the_help_lines_up(self):
         """Every summary starts in the same column — the command field is 34."""

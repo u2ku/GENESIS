@@ -10,6 +10,7 @@
   genesis --card        Genesis's character card
   genesis --tools       what he can run
   genesis prompt        the chat prompt — editable, and live when written
+  genesis codexify      the Codexify install — provisioned and verified
 
 Plain words, if you would rather not ask:
 
@@ -794,11 +795,17 @@ def cmd_tools(args, ctx):
 
 
 def cmd_landing(args, ctx):
-    """Prepare a node as a host, and report whether it is ready.
+    """Prepare a node as a host, and set this machine up as one.
 
-    Landing is also the trigger for the tailnet: a node that is ready but
-    not joined is not a node yet. The key is the wizard's business — it is
-    asked for once and stored once — so landing never prompts for it.
+    Landing is the trigger for the whole node setup: Tailscale, the
+    tailnet, the heartbeat daemon, and the node's own report to the
+    spine. The key is the wizard's business — it is asked for once and
+    stored once — so landing never prompts for it.
+
+    `--readiness-only` (the old `--no-join`) reports readiness and changes
+    nothing on this machine. That is the mode the bootstrap's own
+    readiness probe uses, and the mode to use when the only question is
+    whether a machine is ready.
     """
     if not args.node:
         die("landing needs a path to the node")
@@ -813,9 +820,319 @@ def cmd_landing(args, ctx):
     ready = all(good for _, good in checks)
     emit(views.landing_node(ctx.style, str(node), checks, ready,
                              harness.LANDING_NOTE))
-    if not getattr(args, "no_join", False):
-        emit(views.landing_join(ctx.style, harness.landing_join()))
-    return 0
+    if getattr(args, "readiness_only", False):
+        return 0 if ready else 1
+    outcome = harness.landing_setup(node, join=True)
+    emit(views.landing_setup(ctx.style, outcome.get("rows") or []))
+    return int(outcome.get("exit") or 0)
+
+
+def _codexify_wants_ui(args) -> bool:
+    """The run's intent for the interface: on unless --no-ui.
+
+    The wizard defaults the interface on — the browser opens the app,
+    not the API — and `--with-ui`/`--no-ui` are the explicit overrides.
+    """
+    if getattr(args, "with_ui", None) is not None:
+        return bool(args.with_ui)
+    return not getattr(args, "no_ui", False)
+
+
+def _emit_codexify_report(ctx, report):
+    """One report on the screen, in the house style."""
+    import views
+    rows = [(row.label, row.mark, row.detail) for row in report.rows]
+    emit(views.codexify_report(ctx.style, report.heading, rows,
+                               report.verdict, report.exit_code))
+
+
+def _open_codexify(with_ui: bool):
+    """Open Codexify in the default browser, once it is up.
+
+    The wizard's last act: the stack was just proven by a probe that got
+    an answer, so opening is honest. The interface is opened with
+    `--with-ui`; the backend is what a run without it serves. A machine
+    with no opener — no `open`, no `xdg-open` — is told the URL instead
+    of silently getting nothing.
+    """
+    url = ("http://127.0.0.1:5173" if with_ui
+           else "http://127.0.0.1:8888")
+    opener = shutil.which("open") or shutil.which("xdg-open")
+    if not opener:
+        print(f"  it is running at {url} — open that in a browser.")
+        return
+    try:
+        subprocess.Popen([opener, url], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        print(f"  opened {url}")
+    except OSError as exc:
+        print(f"  it is running at {url} — the browser could not be "
+              f"opened: {exc}")
+
+
+def _codexify_wizard(args, ctx, codexify, explicit):
+    """The continuous wizard: nothing → code → stack → launcher → done.
+
+    One loop, and each pass does the next thing the machine is missing:
+
+    1. no installation → install the code (streamed, every line shown)
+    2. no `.env` or dead stack → run setup (streamed)
+    3. stack answering → make the launcher, and finish
+
+    A phase that fails is named in plain steps, and the wizard asks —
+    in a terminal — whether to retry after the operator has fixed it.
+    It exits when the machine is done, when a retry is declined, or
+    after a phase fails twice the same way; it never exits silently in
+    the middle of a machine that is not finished.
+    """
+    import codexify_install
+    import codexify_native
+
+    print("  the wizard — from nothing to a running stack\n")
+    last_failures = None
+    for _ in range(8):
+        install = codexify.find_install(ROOT, explicit)
+
+        # -- phase 1: the code ------------------------------------------------
+        if install is None:
+            report = codexify_install.install(ROOT, explicit=explicit,
+                                             stream=True)
+            _emit_codexify_report(ctx, report)
+            if report.exit_code != codexify.EXIT_OK:
+                if not _wizard_retry(report):
+                    return report.exit_code
+                continue
+            install = codexify.find_install(ROOT, explicit)
+            if install is None:
+                print("  the install reported success but there is still "
+                      "no installation — stopping rather than looping.")
+                return codexify.EXIT_MISSING_INSTALL
+
+        # -- phase 2: the stack ----------------------------------------------
+        # A --theme is a configuration change, not a missing piece: the
+        # stack may be fully up, but its .env does not carry this theme,
+        # so the setup pass must run anyway to write it and restart the
+        # interface under it.
+        theme_pending = getattr(args, "theme", None) is not None
+        if (theme_pending
+                or not codexify.is_setup_done(
+                    install, want_ui=_codexify_wants_ui(args))):
+            print("\n  phase 2 — provisioning and starting the stack\n")
+            launcher = getattr(args, "launcher", None)
+            if (launcher is None
+                    and not getattr(args, "no_launcher", False)):
+                launcher = "desktop"
+            with_ui = _codexify_wants_ui(args)
+            report = codexify_native.setup(
+                install, explicit=explicit,
+                python=getattr(args, "python", None),
+                preset=getattr(args, "preset", None),
+                model=getattr(args, "model", None),
+                cloud=bool(getattr(args, "allow_cloud", False)),
+                with_ui=with_ui,
+                dry_run=bool(getattr(args, "dry_run", False)),
+                launcher=launcher,
+                theme=getattr(args, "theme", None),
+                stream=True)
+            _emit_codexify_report(ctx, report)
+            if report.exit_code != codexify.EXIT_OK:
+                failures = _failed_steps(report)
+                if failures == last_failures:
+                    print("  the same steps failed twice — the wizard is "
+                          "not going to fix them by running again.")
+                    return report.exit_code
+                last_failures = failures
+                if not _wizard_retry(report):
+                    return report.exit_code
+                continue
+
+            # -- phase 3: the launcher ---------------------------------------
+            if launcher and not any(
+                    row.label == "the launcher"
+                    for row in report.rows):
+                made, detail = codexify_native.make_launcher(
+                    install, launcher)
+                _emit_codexify_report(ctx, codexify.Report(
+                    heading="CODEXIFY (launcher)",
+                    rows=[codexify.Row("the launcher",
+                                       codexify.OK if made
+                                       else codexify.MANUAL, detail)],
+                    verdict=("the launcher is on the "
+                             + ("Desktop" if launcher == "desktop"
+                                else "Applications folder")
+                             if made else "the launcher was not made"),
+                    exit_code=codexify.EXIT_OK))
+
+        # -- done --------------------------------------------------------------
+        print("\n  the wizard is finished — the stack is up.")
+        _open_codexify(_codexify_wants_ui(args))
+        return codexify.EXIT_OK
+
+    print("  the wizard ran out of passes — something is not converging.")
+    return codexify.EXIT_PARTIAL
+
+
+def _failed_steps(report):
+    """The failed rows, as instructions for a person to act on."""
+    return [(row.label, row.detail) for row in report.rows
+            if row.mark == "✗"]
+
+
+def _wizard_retry(report):
+    """A failed phase, and a person's decision about it.
+
+    In a terminal the wizard asks: fix what the rows name and retry, or
+    quit. Piped or flagged non-interactive, it runs once and exits with
+    the honest code — a script driving the wizard gets the truth, not a
+    hang on a prompt nobody can answer.
+    """
+    failed = _failed_steps(report)
+    if not failed:
+        return True
+    print("\n  the wizard could not finish — these steps failed:")
+    for label, detail in failed:
+        print(f"  ✗ {label}: {detail}")
+    if not sys.stdin.isatty() or getattr(_wizard_retry, "no_prompts", False):
+        return False
+    try:
+        answer = input(
+            "\n  fix what is named above and retry? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer not in ("n", "no")
+
+
+def cmd_codexify(args, ctx):
+    """Provision the vendored Codexify install, and report what happened.
+
+    The verbs: `status` reads, `setup` writes and starts, `down` stops,
+    `install` gets the code, `update` moves it forward. Bare
+    `genesis codexify` is the wizard: it walks the machine from nothing
+    to a running stack with a launcher on the Desktop, printing
+    everything as it goes, and it does not exit until the stack is up or
+    a step refuses twice.
+
+    The rule the rows obey: a row that reports a write says only what it
+    wrote. Readiness is claimed by a row that made a request and got an
+    answer, and by nothing else.
+    """
+    try:
+        import codexify
+    except Exception as exc:
+        die(f"cannot load the codexify engine: {exc}")
+
+    explicit = getattr(args, "codexify", None)
+    install = codexify.find_install(ROOT, explicit)
+    verb = getattr(args, "subcommand", None) or "status"
+
+    # The wizard: bare `genesis codexify`, run repeatedly until the
+    # machine is done or a step will not pass. Each pass checks what is
+    # missing and does that phase — the code first, then the stack — so
+    # the wizard converges from any starting state: an empty machine, a
+    # half-configured one, or one that is already up.
+    if verb in ("status", "install") and not explicit:
+        want_wizard = (verb == "install"
+                       or getattr(args, "wizard", False)
+                       or install is None
+                       or getattr(args, "theme", None) is not None
+                       or not codexify.is_setup_done(
+                           install, want_ui=_codexify_wants_ui(args)))
+        if want_wizard:
+            return _codexify_wizard(args, ctx, codexify, explicit)
+
+    # install and update are about the code, not the run. They go before the
+    # mode resolution — before the missing-install refusal — because
+    # `install` is the one verb whose whole job is a machine that has no
+    # installation for a mode to be resolved against.
+    if verb in ("install", "update"):
+        try:
+            import codexify_install
+        except Exception as exc:
+            die(f"cannot load the install engine: {exc}")
+        if verb == "install":
+            report = codexify_install.install(
+                ROOT, explicit=explicit, stream=True)
+            _emit_codexify_report(ctx, report)
+            return report.exit_code
+        report = codexify_install.update(
+            ROOT, explicit=explicit, stream=True)
+        _emit_codexify_report(ctx, report)
+        return report.exit_code
+
+    try:
+        mode = codexify.resolve_mode(
+            install,
+            docker=bool(getattr(args, "docker", False)),
+            native=bool(getattr(args, "native", False)))
+    except ValueError as exc:
+        die(str(exc))
+
+    if mode == codexify.MODE_NATIVE:
+        try:
+            import codexify_native
+        except Exception as exc:
+            die(f"cannot load the native codexify engine: {exc}")
+        if verb == "setup":
+            report = codexify_native.setup(
+                install, explicit=explicit,
+                python=getattr(args, "python", None),
+                preset=getattr(args, "preset", None),
+                model=getattr(args, "model", None),
+                cloud=bool(getattr(args, "allow_cloud", False)),
+                with_ui=bool(getattr(args, "with_ui", False)),
+                dry_run=bool(getattr(args, "dry_run", False)),
+                launcher=getattr(args, "launcher", None),
+            )
+        elif verb == "down":
+            report = codexify_native.down(install, explicit=explicit)
+        else:
+            report = codexify_native.status(install, explicit=explicit)
+        rows = [(row.label, row.mark, row.detail) for row in report.rows]
+        emit(views.codexify_report(ctx.style, report.heading, rows,
+                                    report.verdict, report.exit_code))
+        return report.exit_code
+
+    provider_key = None
+    if verb == "setup":
+        wants_key = (getattr(args, "with_provider_key", False)
+                     or getattr(args, "replace_key", False))
+        if wants_key and not getattr(args, "dry_run", False):
+            key, error = codexify.collect_provider_key(
+                key_file=getattr(args, "key_file", None),
+                provider=getattr(args, "provider", None))
+            if error:
+                # The key did not authenticate. That is a refusal, and a
+                # refusal writes nothing.
+                die(error, codexify.EXIT_KEY_REJECTED)
+            provider_key = key
+        services = None
+        if getattr(args, "services", None):
+            services = args.services.split()
+        report = codexify.setup(
+            install, explicit=explicit,
+            preset=getattr(args, "preset", None),
+            model=getattr(args, "model", None),
+            cloud=bool(getattr(args, "allow_cloud", False)),
+            up=not getattr(args, "no_up", False),
+            build=not getattr(args, "no_build", False),
+            dry_run=bool(getattr(args, "dry_run", False)),
+            profiles=getattr(args, "profile", []) or [],
+            services=services,
+            timeout=float(getattr(args, "timeout", 900.0)),
+            provider_key=provider_key,
+        )
+    elif verb == "down":
+        report = codexify.down(
+            install, explicit=explicit,
+            volumes=bool(getattr(args, "volumes", False)),
+        )
+    else:
+        report = codexify.status(install, explicit=explicit)
+
+    rows = [(row.label, row.mark, row.detail) for row in report.rows]
+    emit(views.codexify_report(ctx.style, report.heading, rows, report.verdict,
+                                report.exit_code))
+    return report.exit_code
 
 
 def cmd_summary(args, ctx):
@@ -1099,11 +1416,128 @@ def _p_help():
 
 
 def _p_landing():
-    p = _parser("landing", "Prepare a node as a host, and report readiness.")
+    p = _parser("landing", "Prepare a node as a host, and set this machine up "
+                           "as one.")
     p.add_argument("node", nargs="?", help="the path to the node")
-    p.add_argument("--no-join", action="store_true",
-                   help="report readiness only; do not join the tailnet")
+    p.add_argument("--readiness-only", "--no-join", dest="readiness_only",
+                   action="store_true",
+                   help="report readiness only; change nothing on this machine")
     return p
+
+
+def _p_codexify():
+    p = _parser(
+        "codexify",
+        "Provision the vendored Codexify install, and prove it runs.",
+        epilog="  genesis codexify install     get the latest code (empty machine ok)\n"
+               "  genesis codexify setup       detect, configure, bring up, verify\n"
+               "  genesis codexify update      move an install to the latest upstream\n"
+               "  genesis codexify status      what is true about it now\n"
+               "  genesis codexify down        stop the stack\n")
+    p.add_argument("subcommand", nargs="?", default="status",
+                   choices=["status", "setup", "down", "install", "update"],
+                   help="what to do (default: status)")
+    p.add_argument("--codexify", default=None,
+                   help="the Codexify installation. Default: the vendored one")
+    p.add_argument("--preset", default=None,
+                   help="the local runtime to target: "
+                        + ", ".join(codexify_presets())
+                        + ". Default: detected")
+    p.add_argument("--model", default=None,
+                   help="the model the local runtime serves. "
+                        "Default: the one it advertises")
+    p.add_argument("--allow-cloud", action="store_true",
+                   help="allow cloud providers, instead of local only")
+    p.add_argument("--no-up", action="store_true",
+                   help="write the configuration and stop; do not start Docker")
+    p.add_argument("--dry-run", action="store_true",
+                   help="show the diff and write nothing")
+    p.add_argument("--no-build", action="store_true",
+                   help="bring the stack up without rebuilding the images")
+    p.add_argument("--timeout", type=float, default=900.0,
+                   help="how long to wait for the stack to come up, in seconds")
+    p.add_argument("--services", default=None,
+                   help="the compose services to start, space separated. "
+                        "Default: the core set")
+    p.add_argument("--profile", action="append", default=[],
+                   help="an extra compose profile: "
+                        + ", ".join(codexify_profiles()))
+    p.add_argument("--with-provider-key", action="store_true",
+                   help="ask for the provider key, once, and write it")
+    p.add_argument("--replace-key", action="store_true",
+                   help="replace a provider key that is already there")
+    p.add_argument("--key-file", default=None,
+                   help="read the provider key from a file. The path is a path")
+    p.add_argument("--provider", default=None,
+                   choices=list(keydetect_provider_choices()),
+                   help="override the provider the key is routed to")
+    p.add_argument("--volumes", action="store_true",
+                   help="with 'down': remove the volumes too")
+    p.add_argument("--native", action="store_true",
+                   help="run it natively, without Docker: the backend and the "
+                        "workers as processes on this machine. This is the "
+                        "default")
+    p.add_argument("--docker", action="store_true",
+                   help="run it under Docker Compose instead, with the "
+                        "containers upstream ships")
+    p.add_argument("--python", default=None,
+                   help="the interpreter to build the native environment with")
+    p.add_argument("--with-ui", action="store_true", default=None,
+                   help="also start the interface (the wizard's default)")
+    p.add_argument("--no-ui", action="store_true",
+                   help="do not start the interface; the browser opens the "
+                        "API instead")
+    p.add_argument("--theme", default=None,
+                   choices=["dark", "light", "system"],
+                   help="the interface's default theme for this route. The "
+                        "user's own choice still wins once they make one")
+    p.add_argument("--launcher", default=None,
+                   choices=["desktop", "applications"],
+                   help="make a double-clickable launcher for the stack "
+                        "once it is up: 'desktop' or 'applications'")
+    p.add_argument("--no-launcher", action="store_true",
+                   help="with 'install': do not make a launcher, even "
+                        "though the wizard's default is to make one")
+    p.add_argument("--wizard", action="store_true",
+                   help="run the continuous wizard even when an install "
+                        "exists: walk every missing phase to a running "
+                        "stack, printing everything")
+    return p
+
+
+def keydetect_provider_choices():
+    """The provider names, from the one table that holds them.
+
+    `keydetect` lives in `tools/`, which the CLI does not put on its own
+    path — but `src/codexify.py` does, and importing it is what makes
+    `keydetect` importable. The table is read from there rather than
+    written out here, because a list of provider names written twice is a
+    list that will be wrong in one of the two places.
+    """
+    try:
+        import codexify  # noqa: F401  — it puts tools/ on the path
+        import keydetect
+        return list(keydetect.PROVIDER_CHOICES)
+    except Exception:
+        return ["anthropic", "openai", "openrouter", "minimax"]
+
+
+def codexify_presets():
+    """The local runtimes Codexify can be pointed at."""
+    try:
+        import codexify
+        return sorted(codexify.PRESETS)
+    except Exception:
+        return ["ollama", "whooshd-mlx"]
+
+
+def codexify_profiles():
+    """The optional compose profiles."""
+    try:
+        import codexify
+        return list(codexify.PROFILES)
+    except Exception:
+        return ["backfill", "cli", "voice"]
 
 
 _command("id", False, "IDENTITY", "the identity constant", _p_id, cmd_id)
@@ -1138,6 +1572,8 @@ _command("tools", False, "DOOR", "what he can run", _p_tools, cmd_tools)
 _command("help", False, "DOOR", "this screen", _p_help, cmd_help)
 _command("landing", True, "ENGINE", "prepare a node as a host",
          _p_landing, cmd_landing)
+_command("codexify", True, "DOOR", "the Codexify install, provisioned and verified",
+         _p_codexify, cmd_codexify)
 
 # Plain words for the same operations. Nobody should need the internal names.
 # "what" and "who" are deliberately absent: a question is a question, and the

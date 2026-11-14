@@ -3,8 +3,16 @@
 
 A node claims liveness by writing a heartbeat and nothing else. This daemon
 does that: a fixed payload, a monotonic sequence number, an interval, and a
-write to the node-local record. It carries no credential, reads no user
-file, and exports nothing.
+write to the node-local record. It carries no credential and reads no user
+file.
+
+It writes **two** node-local records, and the second is the node's report to
+the spine. The heartbeat log is the node's own machine record. The event log
+(`spine_events.jsonl`) holds one **native event** per beat — the shape the
+Studio's reducer reads when it reaches for this node, the way it reaches for
+Bruce's ledger. The node computes neither an event id nor a chain: the spine
+has exactly one writer, and it is the spine. This daemon never writes into
+the spine itself, and it never pushes.
 
 It runs as a **user** service — a `systemd --user` unit on Linux, a
 `LaunchAgent` on macOS — never as a system one. No `sudo`, and it survives
@@ -32,9 +40,17 @@ import node  # noqa: E402
 
 
 def run_once(sequence: int) -> dict:
-    """One heartbeat, written to the node-local record."""
+    """One heartbeat, and the event that reports it.
+
+    Two node-local writes: the heartbeat the node keeps for itself, and
+    the native event the Studio pulls when it reaches for this node. The
+    heartbeat is written first, so the node's own record is never older
+    than the event that says the node is alive.
+    """
     payload = node.heartbeat_payload(sequence)
     node.write_heartbeat(payload)
+    event = node.write_spine_event(payload)
+    payload["event_id"] = event["provenance"]["local_event_id"]
     return payload
 
 
@@ -73,7 +89,8 @@ def main(argv=None) -> int:
         count += 1
         payload = run_once(sequence)
         print(f"heartbeat {payload['seq']} {payload['ts']} "
-              f"node={payload['node']} joined={payload['tailnet_joined']}",
+              f"node={payload['node']} joined={payload['tailnet_joined']} "
+              f"event={payload.get('event_id')}",
               flush=True)
         if args.once:
             return 0

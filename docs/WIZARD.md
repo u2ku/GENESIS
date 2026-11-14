@@ -349,6 +349,23 @@ services read `OPENAI_API_KEY` from it. The wizard:
   **manual step** with the exact command (`docs/PORTABILITY.md` §6.5) — not
   skipped silently, and not a failure of the wizard.
 
+**The provisioning command is a different tool, and it owns different keys.**
+`genesis codexify` (`docs/CODEXIFY.md`) brings the whole Codexify system up,
+not just its credential. It therefore has to write what that system needs to
+exist at all — including `GUARDIAN_API_KEY` and `NEO4J_PASS`, which compose
+refuses to start without and which `graph-init` exits 1 without.
+
+The split is deliberate, and it holds in both directions:
+
+- the **credential wizard** never writes `GUARDIAN_API_KEY`. It is not the
+  credential wizard's secret, and it will not rotate one;
+- the **provisioning command** generates `GUARDIAN_API_KEY` and `NEO4J_PASS`
+  and never asks the operator for either. They are Codexify's secrets, and
+  the operator is not asked to type a secret they do not own.
+
+§1.1's rule is unchanged: one prompt per distinct secret, and the only secret
+a human enters is the provider key.
+
 ### 4.3 Claude Code
 
 The wiring is the documented one (`docs/PORTABILITY.md` §7.2), and it is
@@ -940,6 +957,12 @@ This document extends the portability spec. The delta, exactly:
    credentials from the environment still stands; the wizard is what
    establishes this one, and it does so only when the node is joining a
    tailnet.
+9. **§5.4 (flag set)** — add `genesis codexify`, a separate command from the
+   ladder. It is the *provisioning* surface for Codexify
+   (`docs/CODEXIFY.md`), and it owns `GUARDIAN_API_KEY` and `NEO4J_PASS`,
+   which the credential wizard does not touch (§4.2). It is self-contained:
+   it does not go through the ladder's receipt and manifest, and it does not
+   disturb the ladder's own actions.
 
 Nothing else in `docs/PORTABILITY.md` changes. Where the two documents could
 be read as disagreeing, this one is about the wizard and that one is about

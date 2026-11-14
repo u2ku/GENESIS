@@ -39,6 +39,7 @@ import socket
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -60,8 +61,19 @@ NODE_DIR = Path.home() / ".config" / "luna-node"
 
 NODE_PROFILE = CONFIG_DIR / "node.json"
 HEARTBEAT_LOG = STATE_DIR / "heartbeat.jsonl"
+SPINE_EVENTS_LOG = STATE_DIR / "spine_events.jsonl"
 NODE_RECORD = STATE_DIR / "record.md"
 AUTH_KEY_FILE = NODE_DIR / "auth.key"
+
+# The node's native events, for the spine. The spine has exactly one
+# writer, and it is the spine: the Studio's reducer reads these rows and
+# envelopes them into the ledger. So the node writes the event the way
+# Bruce writes his ledger rows — natively, with an id of its own — and
+# computes neither the ULID nor the chain.
+SPINE_SCHEMA = "genesis.node.v1"
+SPINE_EVENT_TYPE = "node.heartbeat"
+SPINE_CATEGORY = "system"
+SPINE_VISIBILITY = "public"
 
 # The heartbeat interval. Sixty seconds is the contract's default; the
 # retention question is still open with Zac, so the log is bounded rather
@@ -82,10 +94,17 @@ VISIBILITY_MARKERS = visibility.KNOWN_VALUES
 
 # ------------------------------------------------------------------ the profile --
 
-def node_profile() -> dict:
-    """The node-local profile. Machine-local, never published."""
+def node_profile(path: Optional[Path] = None) -> dict:
+    """The node-local profile. Machine-local, never published.
+
+    The path can be given, so that a caller whose HOME is not this
+    process's HOME — a test with a temporary home, a tool that resolves
+    the location itself — reads the file it means to read, and not the
+    operator's.
+    """
+    target = Path(path) if path else NODE_PROFILE
     try:
-        data = json.loads(NODE_PROFILE.read_text(encoding="utf-8"))
+        data = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -166,10 +185,13 @@ def package_manager() -> str:
 def install_command() -> list:
     """The command that installs Tailscale the supported way.
 
-    Returned rather than run: installing a system package needs privileges
-    the agent does not have, and a tool that shells out to sudo behind the
-    operator's back is a tool that should not exist. The caller decides
-    whether to run it.
+    This is the **only** route table: pacman on Arch and Omarchy, apt on
+    Debian, brew on macOS. Never a vendored binary, never a `curl | sh`.
+
+    Returned rather than run, so that the caller can look at it first.
+    `install_tailscale` is the caller that runs it — and it runs it only
+    when the command needs no password, because a password prompt nobody
+    asked for is not a step a tool takes.
     """
     manager = package_manager()
     if manager == "pacman":
@@ -236,8 +258,7 @@ def join_tailnet(key_file: Optional[Path] = None) -> dict:
 
     The sequence is honest about its own limits:
 
-    - Tailscale missing → a **manual step** with the exact command. The
-      tool does not run `sudo` behind the operator's back.
+    - Tailscale missing → a **manual step** with the exact command.
     - no auth key file → a **manual step**: the wizard establishes the
       secret, and the wizard is the only thing that asks for it.
     - root needed and no non-interactive sudo → a **manual step** with the
@@ -247,14 +268,19 @@ def join_tailnet(key_file: Optional[Path] = None) -> dict:
 
     The result is reported either way. A dead tailnet is never silently
     continued past.
+
+    Whether a join is needed at all is the caller's question: the key is
+    single-use and spent once it has been used, so the callers ask
+    `tailscale_status` before they call this.
     """
     path = Path(key_file) if key_file else auth_key_file()
     result = {"joined": False, "detail": "", "manual": False,
-              "ip": "", "hostname": ""}
+              "ip": "", "hostname": "", "reason": ""}
 
     if not tailscale_installed():
         command = install_command()
         result["manual"] = True
+        result["reason"] = "not-installed"
         result["detail"] = (
             "Tailscale is not installed on this machine."
             + (f" Install it with: {' '.join(command)}" if command else
@@ -263,6 +289,7 @@ def join_tailnet(key_file: Optional[Path] = None) -> dict:
 
     if not path.exists():
         result["manual"] = True
+        result["reason"] = "no-key"
         result["detail"] = (
             f"no tailnet auth key at {path}. The wizard asks for it once "
             "and stores it there; nothing else creates it.")
@@ -271,6 +298,7 @@ def join_tailnet(key_file: Optional[Path] = None) -> dict:
     command = tailscale_up_command(path)
     if needs_root() and not sudo_available():
         result["manual"] = True
+        result["reason"] = "needs-root"
         result["detail"] = (
             "joining the tailnet needs root, and sudo is not usable without "
             "a password prompt here. Run it yourself:\n  "
@@ -279,11 +307,13 @@ def join_tailnet(key_file: Optional[Path] = None) -> dict:
 
     try:
         completed = subprocess.run(command, capture_output=True, text=True,
-                                   timeout=300)
+                                   timeout=300, stdin=subprocess.DEVNULL)
     except Exception as exc:
+        result["reason"] = "failed"
         result["detail"] = f"{type(exc).__name__}: {exc}"
         return result
     if completed.returncode != 0:
+        result["reason"] = "failed"
         result["detail"] = (completed.stderr or completed.stdout or
                             "tailscale up failed").strip()[:300]
         return result
@@ -292,6 +322,7 @@ def join_tailnet(key_file: Optional[Path] = None) -> dict:
     result["joined"] = bool(status.get("running"))
     result["ip"] = status.get("ip", "")
     result["hostname"] = status.get("hostname", "")
+    result["reason"] = "joined" if result["joined"] else "failed"
     result["detail"] = ("joined as " + (result["ip"] or "an unknown address")) \
         if result["joined"] else "tailscale up returned success but the " \
         "tailnet is not running"
@@ -305,6 +336,353 @@ def join_tailnet(key_file: Optional[Path] = None) -> dict:
         }
         save_node_profile(profile)
     return result
+
+
+# ------------------------------------------------------------------- the host --
+
+# The daemon's identity, in the two places that need it: the launchd label
+# and the systemd unit name. One name, so there is one job on a machine.
+DAEMON_LABEL = "dev.genesis.node"
+DAEMON_UNIT_NAME = "genesis-node.service"
+
+
+def daemon_kind() -> str:
+    """How a node's daemon runs on this host.
+
+    A **user** service, always: a `systemd --user` unit on Linux, a
+    `LaunchAgent` on macOS. Never a system one — no sudo, and it survives
+    `omarchy-update`, because a machine that has to be re-rooted to keep
+    its own node alive is not a node.
+
+    The empty string means this host runs neither, and so cannot host a
+    node's daemon.
+    """
+    if platform.system() == "Darwin":
+        return "launchd-agent"
+    if Path("/run/systemd/system").exists():
+        return "systemd-user"
+    return ""
+
+
+def daemon_unit_path(kind: str = "") -> Path:
+    """Where the daemon's unit lives on this host."""
+    if kind == "launchd-agent":
+        return Path.home() / "Library" / "LaunchAgents" / f"{DAEMON_LABEL}.plist"
+    return Path.home() / ".config" / "systemd" / "user" / DAEMON_UNIT_NAME
+
+
+def daemon_unit_content(kind: str, script: Optional[Path] = None,
+                         workdir: Optional[Path] = None) -> str:
+    """The unit. The one copy of this text.
+
+    The daemon runs as a **user** service: `systemd --user` on Linux, a
+    `LaunchAgent` on macOS. No sudo, and it survives `omarchy-update`.
+    """
+    daemon = Path(script) if script else (ROOT / "tools" / "node_daemon.py")
+    work = Path(workdir) if workdir else ROOT
+    if kind == "launchd-agent":
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0">\n'
+            "<dict>\n"
+            "  <key>Label</key>\n"
+            f"  <string>{DAEMON_LABEL}</string>\n"
+            "  <key>ProgramArguments</key>\n"
+            "  <array>\n"
+            f"    <string>{sys.executable}</string>\n"
+            f"    <string>{daemon}</string>\n"
+            "  </array>\n"
+            "  <key>RunAtLoad</key>\n"
+            "  <true/>\n"
+            "  <key>KeepAlive</key>\n"
+            "  <true/>\n"
+            "  <key>WorkingDirectory</key>\n"
+            f"  <string>{work}</string>\n"
+            "</dict>\n"
+            "</plist>\n")
+    return (
+        "[Unit]\n"
+        "Description=GENESIS node — the heartbeat daemon\n"
+        "\n"
+        "[Service]\n"
+        "ExecStart=%s %s\n"
+        "Restart=on-failure\n"
+        "RestartSec=30\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n" % (sys.executable, daemon))
+
+
+def install_daemon_unit(content: str, path: Path) -> dict:
+    """Write the daemon's unit — if it is not already this one.
+
+    A unit that is already ours is left exactly as it is. A unit that is
+    NOT ours is never overwritten: something else owns that label, and a
+    node that quietly took it over would be a false success. The refusal
+    is the honest answer, and it is a conflict, not a failure.
+    """
+    path = Path(path)
+    if path.exists():
+        try:
+            existing = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return {"ok": False, "path": str(path), "reason": "failed",
+                    "detail": f"{type(exc).__name__}: {exc}"}
+        if existing == content:
+            return {"ok": True, "path": str(path), "reason": "already",
+                    "detail": "already there — " + str(path)}
+        return {"ok": False, "path": str(path), "reason": "conflict",
+                "detail": (f"a different unit is at {path}. it was left alone "
+                           f"— remove it, or point the node at this one")}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        return {"ok": False, "path": str(path), "reason": "failed",
+                "detail": f"{type(exc).__name__}: {exc}"}
+    return {"ok": True, "path": str(path), "reason": "written",
+            "detail": "written — " + str(path)}
+
+
+def enable_daemon(path: Path) -> tuple:
+    """Enable and start the daemon as a *user* service. Never a system one.
+
+    The launchd branch takes the label first, waits for launchd to release
+    it, and then CHECKS that the job left registered is the file we wrote:
+    `launchctl load` onto a label that is already taken prints "Load
+    failed" and returns 0, so the old job would keep the label and the
+    plist just written would be ignored.
+    """
+    unit_path = Path(path)
+    if unit_path.suffix == ".plist":
+        label = unit_path.stem
+        domain = f"gui/{os.getuid()}/{label}"
+        subprocess.run(["launchctl", "bootout", domain],
+                       capture_output=True, text=True, timeout=60,
+                       stdin=subprocess.DEVNULL)
+        # The bootout is ASYNCHRONOUS: launchd releases the label a moment
+        # later, and a load issued in that window still finds it taken. So
+        # wait for the label to actually be free before loading into it.
+        for _ in range(40):
+            if subprocess.run(["launchctl", "print", domain],
+                              capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL).returncode != 0:
+                break
+            time.sleep(0.25)
+        result = subprocess.run(["launchctl", "load", "-w", str(unit_path)],
+                                capture_output=True, text=True, timeout=120,
+                                stdin=subprocess.DEVNULL)
+        stderr = (result.stderr or "").strip()
+        if result.returncode != 0 or "Load failed" in stderr:
+            return False, stderr[:200]
+        registered = subprocess.run(["launchctl", "print", domain],
+                                    capture_output=True, text=True, timeout=60,
+                                    stdin=subprocess.DEVNULL)
+        if str(unit_path.resolve()) not in (registered.stdout or ""):
+            return False, (f"{label} did not take: it is registered from "
+                           f"somewhere else")
+        return True, "loaded"
+    result = subprocess.run(["systemctl", "--user", "enable", "--now",
+                             unit_path.name],
+                            capture_output=True, text=True, timeout=120,
+                            stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        return False, (result.stderr or "").strip()[:200]
+    return True, "enabled"
+
+
+def daemon_state(path: Optional[Path] = None) -> dict:
+    """Is the daemon running, and is it running OUR unit?
+
+    The question is asked of the service manager, never of the file: a unit
+    on disk is a write report, not a liveness report.
+    """
+    kind = daemon_kind()
+    unit = Path(path) if path else daemon_unit_path(kind)
+    if not unit.exists():
+        return {"running": False, "detail": "no unit at " + str(unit)}
+    if unit.suffix == ".plist":
+        label = unit.stem
+        domain = f"gui/{os.getuid()}/{label}"
+        try:
+            result = subprocess.run(["launchctl", "print", domain],
+                                    capture_output=True, text=True, timeout=60,
+                                    stdin=subprocess.DEVNULL)
+        except Exception as exc:
+            return {"running": False, "detail": f"{type(exc).__name__}: {exc}"}
+        if result.returncode != 0:
+            return {"running": False, "detail": "not registered with launchd"}
+        if str(unit.resolve()) not in (result.stdout or ""):
+            return {"running": False,
+                    "detail": f"registered from somewhere else, not {unit}"}
+        return {"running": True, "detail": label}
+    try:
+        result = subprocess.run(["systemctl", "--user", "is-active",
+                                 unit.name], capture_output=True, text=True,
+                                timeout=60, stdin=subprocess.DEVNULL)
+    except Exception as exc:
+        return {"running": False, "detail": f"{type(exc).__name__}: {exc}"}
+    if result.returncode != 0:
+        return {"running": False,
+                "detail": (result.stdout or "").strip() or "not active"}
+    return {"running": True, "detail": (result.stdout or "").strip() or "active"}
+
+
+def install_tailscale() -> dict:
+    """Install Tailscale with the system package manager. Never vendored.
+
+    `{"installed": bool, "manual": bool, "detail": str}`. The **manual**
+    flag means a human still owes the step: the install needs root and
+    sudo is not usable without a password prompt here. A tool that opens a
+    password prompt nobody asked for is a tool that should not exist, so
+    the command is handed back instead, with the reason.
+    """
+    if tailscale_installed():
+        return {"installed": True, "manual": False,
+                "detail": "already installed — " + (which("tailscale") or "")}
+    command = install_command()
+    if not command:
+        return {"installed": False, "manual": True,
+                "detail": "no known package manager — install Tailscale by hand"}
+    if command[0] == "sudo" and not sudo_available():
+        return {"installed": False, "manual": True,
+                "detail": ("installing Tailscale needs root, and sudo is not "
+                           "usable without a password prompt here. Run it "
+                           "yourself:\n  " + " ".join(command))}
+    try:
+        result = subprocess.run(command, capture_output=True, text=True,
+                                timeout=900, stdin=subprocess.DEVNULL)
+    except Exception as exc:
+        return {"installed": False, "manual": False,
+                "detail": f"{type(exc).__name__}: {exc}"}
+    if result.returncode != 0:
+        return {"installed": False, "manual": False,
+                "detail": (f"{' '.join(command)} failed: "
+                           f"{(result.stderr or '').strip()[:200]}")}
+    if not tailscale_installed():
+        return {"installed": False, "manual": False,
+                "detail": "the install finished but tailscale is not on PATH"}
+    return {"installed": True, "manual": False,
+            "detail": "installed — " + (which("tailscale") or "")}
+
+
+# ---------------------------------------------------------------- the setup --
+
+def setup_node(node_dir: Path, join: bool = True) -> dict:
+    """Set this machine up as a node. Returns {"rows": [...], "exit": int}.
+
+    Every row is the result of something that ran, or the middot that says
+    a human still owes the step. Nothing here is claimed because a plan
+    intended it.
+
+    `join=False` changes **nothing** on this machine: no install, no unit,
+    no service, no join. It is the readiness probe's mode, and the
+    wizard's own readiness probe calls it — so the promise is kept here,
+    in the one place that could break it.
+
+    The exit code is the most specific refusal, and the ladder is the
+    project's own: 3 unsupported host, 5 a prerequisite a human owes, 6 a
+    conflict, 9 a precondition the wizard owns, 1 something failed, 0 all
+    of it worked.
+    """
+    if not join:
+        return {"rows": [], "exit": 0}
+
+    rows = []
+    failed = False
+    manual_install = False
+    unsupported_host = False
+    conflict = False
+    missing_key = False
+
+    # 1. Tailscale — the system package manager, or it is already there.
+    if tailscale_installed():
+        rows.append(("tailscale", "✓",
+                     "already installed — " + (which("tailscale") or "")))
+    else:
+        result = install_tailscale()
+        if result["installed"]:
+            rows.append(("tailscale", "✓", result["detail"]))
+        elif result["manual"]:
+            rows.append(("tailscale", "·", result["detail"]))
+            manual_install = True
+        else:
+            rows.append(("tailscale", "✗", result["detail"]))
+            failed = True
+
+    # 2. The tailnet — the join, with the secret the wizard established.
+    #    Whether a join is needed is asked first: the key is single-use,
+    #    and a spent key fails for the wrong reason.
+    status = tailscale_status()
+    if status.get("running"):
+        rows.append(("tailnet", "✓",
+                     "already on the tailnet — " + (status.get("ip") or
+                                                    "no address")))
+    else:
+        joined = join_tailnet()
+        if joined["joined"]:
+            rows.append(("tailnet", "✓", joined["detail"]))
+        elif joined["manual"]:
+            rows.append(("tailnet", "·", joined["detail"]))
+            if joined.get("reason") == "no-key":
+                missing_key = True
+        else:
+            rows.append(("tailnet", "✗", joined["detail"]))
+            failed = True
+
+    # 3 and 4. The daemon's unit, and the daemon itself.
+    kind = daemon_kind()
+    if not kind:
+        rows.append(("daemon unit", "✗",
+                     "this host runs neither systemd --user nor launchd"))
+        unsupported_host = True
+    else:
+        script = Path(node_dir) / "tools" / "node_daemon.py"
+        if not script.exists():
+            script = ROOT / "tools" / "node_daemon.py"
+        workdir = Path(node_dir) if Path(node_dir).exists() else ROOT
+        unit = daemon_unit_path(kind)
+        written = install_daemon_unit(
+            daemon_unit_content(kind, script, workdir), unit)
+        if not written["ok"]:
+            rows.append(("daemon unit", "✗", written["detail"]))
+            if written.get("reason") == "conflict":
+                conflict = True
+            else:
+                failed = True
+        else:
+            rows.append(("daemon unit", "✓", written["detail"]))
+            enabled, detail = enable_daemon(unit)
+            state = daemon_state(unit)
+            if enabled and state["running"]:
+                rows.append(("daemon", "✓", "running — " + state["detail"]))
+            elif enabled:
+                rows.append(("daemon", "✗", state["detail"]))
+                failed = True
+            else:
+                rows.append(("daemon", "✗", detail))
+                failed = True
+
+    # 5. The spine — what this node reports, and where it says so.
+    reporting = spine_reporting_state()
+    if reporting["reporting"]:
+        rows.append(("spine events", "✓", reporting["detail"]))
+    else:
+        rows.append(("spine events", "·", reporting["detail"]))
+
+    exit_code = 1 if failed else 0
+    if manual_install:
+        exit_code = exit_code or 5
+    if unsupported_host:
+        exit_code = 3
+    if conflict:
+        exit_code = 6
+    if missing_key:
+        exit_code = 9
+    return {"rows": rows, "exit": exit_code}
 
 
 # ---------------------------------------------------------------- the heartbeat --
@@ -472,14 +850,108 @@ def write_heartbeat(payload: dict) -> Path:
 
 def _trim_heartbeat_log(limit: int = DEFAULT_RETENTION) -> None:
     """Keep the log bounded. The retention number is a default, not a law."""
+    _trim_log(HEARTBEAT_LOG, limit)
+
+
+def _trim_log(path: Path, limit: int = DEFAULT_RETENTION) -> None:
+    """Keep an append-only log bounded."""
     try:
-        lines = HEARTBEAT_LOG.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return
     if len(lines) <= limit:
         return
     keep = lines[-limit:]
-    HEARTBEAT_LOG.write_text("\n".join(keep) + "\n", encoding="utf-8")
+    path.write_text("\n".join(keep) + "\n", encoding="utf-8")
+
+
+# ------------------------------------------------------------- the spine events --
+
+def spine_event(payload: dict) -> dict:
+    """One native event, in the shape the spine's reducer envelopes.
+
+    The node computes **neither** the event id nor the chain: the spine
+    has exactly one writer, and it is the spine. What the node owns is its
+    own event — a stable id of its own, so the reducer can ingest it
+    exactly once — and the payload.
+
+    The payload is the heartbeat, unchanged: no credential, no tailnet
+    address, no user file contents. That is what makes this event
+    `public` rather than `operator`.
+
+    `turn_id` is null and `turn_role` is "ambient": a node cannot know
+    whether a beat falls inside a Mac tick's window, so it does not claim
+    that linkage. The Studio's reducer decides it, the way it does for
+    every other source.
+    """
+    node = str(payload.get("node") or node_id())
+    epoch_ms = int(time.time() * 1000)
+    summary = f"node {node} heartbeat {payload.get('seq')}"
+    return {
+        "node": f"genesis-{node}",
+        "timestamp": datetime.now(timezone.utc).isoformat(
+            timespec="milliseconds"),
+        "category": SPINE_CATEGORY,
+        "type": SPINE_EVENT_TYPE,
+        "source": node,
+        "turn_id": None,
+        "turn_role": "ambient",
+        "payload": payload,
+        "summary": summary[:200],
+        "visibility": SPINE_VISIBILITY,
+        "permissions_required": [],
+        "provenance": {
+            "node_id": f"genesis-{node}",
+            "local_event_id": f"{epoch_ms}-{payload.get('seq')}",
+            "native_schema": SPINE_SCHEMA,
+        },
+    }
+
+
+def write_spine_event(payload: dict) -> dict:
+    """Append one native event to the node's spine log.
+
+    The log is the node's **native** source — the thing the Studio reads
+    when it pulls this node, the way it pulls Bruce's ledger. It is
+    append-only, bounded, and node-local; it is not the spine, and
+    writing here is not a second writer of the spine's record.
+
+    Returns the event that was written, so that the caller can name it.
+    """
+    event = spine_event(payload)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(STATE_DIR, 0o700)
+    except OSError:
+        pass
+    with SPINE_EVENTS_LOG.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
+    try:
+        os.chmod(SPINE_EVENTS_LOG, 0o600)
+    except OSError:
+        pass
+    _trim_log(SPINE_EVENTS_LOG)
+    return event
+
+
+def spine_reporting_state() -> dict:
+    """Is this node's event log being written? -> {"reporting", "detail"}
+
+    Proved by the log's own mtime, not by the fact that a daemon unit
+    exists: a unit on disk is a write report, not a liveness report.
+    """
+    if not SPINE_EVENTS_LOG.exists():
+        return {"reporting": False,
+                "detail": "no event log at " + str(SPINE_EVENTS_LOG)}
+    try:
+        age = time.time() - SPINE_EVENTS_LOG.stat().st_mtime
+    except OSError as exc:
+        return {"reporting": False, "detail": f"{type(exc).__name__}: {exc}"}
+    if age > DEFAULT_INTERVAL * 3:
+        return {"reporting": False,
+                "detail": (f"the event log has not been written to for "
+                           f"{int(age)}s")}
+    return {"reporting": True, "detail": str(SPINE_EVENTS_LOG)}
 
 
 # ------------------------------------------------------------------- the export --

@@ -466,59 +466,51 @@ LANDING_NOTE = ("The machine you choose becomes the machine you are. Whatever "
                 "you pick here, you shape it, and it answers to you.")
 
 
-def landing_join():
-    """The tailnet join, as the landing tool triggers it.
+def landing_setup(node_dir: Path, join: bool = True) -> dict:
+    """The setup: the rows, and the exit code.
 
-    The tailnet is the connective layer between a node and the spine, and
-    `landing` is the trigger for it: Genesis can call this tool, so a node
-    joins without a second ladder and without a second prompt for the key.
-    The key itself is the wizard's business — it is asked for once, stored
-    once, and passed to `tailscale` as a path.
+    -> {"rows": [(label, mark, detail), ...], "exit": int}
 
-    The join is honest about its limits. A machine without Tailscale gets
-    the exact command and a human, not a silent `sudo` behind the
-    operator's back; a machine with no auth key file is told that the
-    wizard establishes that secret and nothing else does. A dead tailnet is
-    never silently continued past.
+    The setup itself lives in the contract module — `node.setup_node` —
+    because the rules about what a node needs, and what a human still owes
+    a node, are the contract's, not this file's.
 
-    Returns rows of (label, mark, detail) — the mark is ✓, ✗ or · for a
-    step that needs a human.
+    Every row is the result of something that ran, or the middot that says
+    a human still owes the step.
     """
     try:
         import node as node_contract
     except Exception as exc:
-        return [("tailnet", "✗", f"the node contract could not be loaded: {exc}")]
-
-    status = node_contract.tailscale_status()
-    if status.get("running"):
-        address = status.get("ip") or ""
-        return [("tailnet", "✓", "joined" + (f" — {address}" if address else ""))]
-
-    result = node_contract.join_tailnet()
-    detail = result.get("detail", "")
-    if result.get("joined"):
-        return [("tailnet", "✓", detail)]
-    if result.get("manual"):
-        return [("tailnet", "·", detail)]
-    return [("tailnet", "✗", detail)]
+        return {"rows": [("setup", "✗",
+                          f"the node contract could not be loaded: {exc}")],
+                "exit": 1}
+    try:
+        outcome = node_contract.setup_node(node_dir, join=join)
+    except Exception as exc:
+        return {"rows": [("setup", "✗", f"{type(exc).__name__}: {exc}")],
+                "exit": 1}
+    return {"rows": list(outcome.get("rows") or []),
+            "exit": int(outcome.get("exit") or 0)}
 
 
 def t_landing(args):
-    """Prepare a node as a host and report readiness.
+    """Prepare a node as a host, and set this machine up as one.
 
     The note to pass to Luna comes back with it — the host she picks becomes
     the machine she is, and that is hers to act on.
 
-    Landing is also the trigger for the tailnet: preparing a node and
-    joining it to the spine are one action, and the key is asked for
-    exactly once, by the wizard.
+    Landing is the trigger for the whole node setup: Tailscale, the
+    tailnet, the heartbeat daemon, and the node's own report to the spine.
+    The key is the wizard's business — it is asked for once, stored once —
+    so landing never prompts for it. A machine without the key is told who
+    makes one, and the rest of the setup still happens.
     """
     node = (args.get("node") or "").strip()
     if not node:
         return "no node given — pass a path to the node"
     p = Path(node).expanduser()
     if not p.exists():
-        return f"{p} does not exist"
+        return f"no such node: {p}"
     checks = landing_checks(p)
     ready = all(g for _, g in checks)
     out = [f"node readiness — {p}", ""]
@@ -526,10 +518,12 @@ def t_landing(args):
         out.append(f"  {'✓' if good else '✗'} {label}")
     out.append("")
     out.append("  READY for Luna to choose" if ready else "  NOT READY")
-    if args.get("join", True):
+    setup = landing_setup(p, join=bool(args.get("join", True)))
+    rows = setup.get("rows") or []
+    if rows:
         out.append("")
-        out.append("  tailnet")
-        for label, mark, detail in landing_join():
+        out.append("  setup — this machine as a node")
+        for label, mark, detail in rows:
             out.append(f"    {mark} {label}  {detail}")
     out.append("")
     out.append("note to pass to Luna:")
@@ -594,14 +588,17 @@ TOOLS = [
     ("guardrail", "Enforce the guard rail across the system.",
      t_guardrail, {"type": "object", "properties": {}}),
 
-    ("landing", "Prepare a node as a host: check it is ready, join it to the "
-                "tailnet, and return the note to pass to Luna before she "
-                "chooses it.",
+    ("landing", "Prepare this machine as a node: check it is ready, install "
+                "Tailscale, join the tailnet, write and start the heartbeat "
+                "daemon, and report what actually happened.",
      t_landing,
      {"type": "object", "properties": {
          "node": {"type": "string", "description": "path to the node"},
          "join": {"type": "boolean",
-                  "description": "join the tailnet too (default: true)"}}}),
+                  "description": "set this machine up as a node: install, "
+                                 "join the tailnet, write and start the "
+                                 "daemon (default: true). false reports "
+                                 "readiness and changes nothing."}}}),
 ]
 
 

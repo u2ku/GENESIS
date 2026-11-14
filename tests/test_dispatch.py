@@ -52,6 +52,12 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(cli_module.classify(["now"]), ("stamp", []))
         self.assertEqual(cli_module.classify(["safety"]), ("guardrail", []))
         self.assertEqual(cli_module.classify(["check"]), ("check", []))
+        self.assertEqual(cli_module.classify(["codexify"]), ("codexify", []))
+
+    def test_a_command_with_a_subcommand_still_matches(self):
+        """`genesis codexify setup` is the command, not a question."""
+        self.assertEqual(cli_module.classify(["codexify", "setup"]),
+                         ("codexify", ["setup"]))
 
     def test_flags_after_a_command_still_match(self):
         self.assertEqual(cli_module.classify(["identity", "--explain"]),

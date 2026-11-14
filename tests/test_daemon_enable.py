@@ -27,10 +27,11 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import bootstrap  # noqa: E402
+import node  # noqa: E402
 import hermetic  # noqa: E402
 
 # The REAL launchctl, by absolute path: the stub is first on PATH, and
@@ -100,7 +101,7 @@ class DaemonEnableCase(unittest.TestCase):
         ``✓ shim-enable`` for a service that was never installed.
         """
         self._mode("fail")
-        ok, detail = bootstrap._enable_daemon(str(self.plist))
+        ok, detail = node.enable_daemon(str(self.plist))
         self.assertFalse(ok,
                          f"the wizard reported a service it never loaded: "
                          f"{detail!r}")
@@ -118,7 +119,7 @@ class DaemonEnableCase(unittest.TestCase):
         stale.write_text(_PLIST, encoding="utf-8")
         self._stub("load", "-w", str(stale))
         self._mode("taken")
-        ok, detail = bootstrap._enable_daemon(str(self.plist))
+        ok, detail = node.enable_daemon(str(self.plist))
         self.assertFalse(ok,
                          f"the wizard reported a service it never loaded: "
                          f"{detail!r}")
@@ -131,7 +132,7 @@ class DaemonEnableCase(unittest.TestCase):
         be worthless. The job that ends up registered must be the plist
         the wizard wrote.
         """
-        ok, detail = bootstrap._enable_daemon(str(self.plist))
+        ok, detail = node.enable_daemon(str(self.plist))
         self.assertTrue(ok, detail)
         printed = self._stub("print", f"gui/{os.getuid()}/{LABEL}")
         self.assertIn(str(self.plist.resolve()), printed.stdout)
@@ -146,7 +147,7 @@ class DaemonEnableCase(unittest.TestCase):
         stale.parent.mkdir(parents=True, exist_ok=True)
         stale.write_text(_PLIST, encoding="utf-8")
         self._stub("load", "-w", str(stale))
-        ok, detail = bootstrap._enable_daemon(str(self.plist))
+        ok, detail = node.enable_daemon(str(self.plist))
         self.assertTrue(ok, detail)
         printed = self._stub("print", f"gui/{os.getuid()}/{LABEL}")
         self.assertIn(str(self.plist.resolve()), printed.stdout)
@@ -160,7 +161,7 @@ class DaemonEnableCase(unittest.TestCase):
         already deleted, holding :8790 open under KeepAlive.
         """
         before = real_job_registered()
-        ok, detail = bootstrap._enable_daemon(str(self.plist))
+        ok, detail = node.enable_daemon(str(self.plist))
         self.assertTrue(ok, detail)
         self.assertEqual(before, real_job_registered(),
                          "the suite installed a live launchd job")

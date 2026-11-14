@@ -64,6 +64,7 @@ genesis stamp           # ⟨TCSI t|moon|aeon⟩ — the grounding token
 genesis shield A B      # two continuity lines → a geomancy shield chart
 genesis symbols         # the symbolic forms
 genesis check           # verify the system
+genesis codexify status # the Codexify install, and whether it works
 ```
 
 ## The CLI
@@ -176,6 +177,26 @@ The engine does, not describes.
 | `genesis shield <a> <b>` | two moments composed into a geomancy shield chart |
 | `genesis playlist` | the prompt for the new playlist — printed verbatim, ready to paste |
 | `genesis landing <node>` | prepare a node as a host, and report readiness |
+
+### Codexify
+
+Codexify is the third of the three consumers, and the only one that needs a
+whole system rather than a key. `genesis codexify` provisions the vendored
+install, brings it up, and proves it works.
+
+| command | does |
+|---|---|
+| `genesis codexify status` | what is true about it right now; writes nothing |
+| `genesis codexify setup` | detect, configure, bring the stack up, wait, verify |
+| `genesis codexify setup --dry-run` | the diff, with every secret masked, and nothing written |
+| `genesis codexify down` | stop the stack (`--volumes` also removes the data) |
+| `genesis codexify setup --docker` | run it under Docker Compose instead, with the containers upstream ships |
+
+It runs **natively** by default — the backend and the workers as processes on
+the machine, with no container runtime at all. An installation that was set
+up under Docker keeps that mode; `--docker` moves it.
+
+The detail is in [`docs/CODEXIFY.md`](docs/CODEXIFY.md).
 
 **The stamp is the anchor.** Every continuity line carries
 `⟨TCSI t|<moon>|<aeon 8-bit>⟩`: the clocktime, the lunar phase, and the

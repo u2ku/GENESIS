@@ -113,16 +113,19 @@ GENESIS/
 ├── src/
 │   ├── tcsi.py                    the vendored TCSI fallback (§8.3) — Phase A
 │   ├── visibility.py              the write-time visibility contract — Phase A
-│   └── node.py                    NEW  the node contract — join, heartbeat, export
+│   ├── node.py                    NEW  the node contract — join, heartbeat, export
+│   └── codexify.py                NEW  the Codexify provisioner (§5.6)
 ├── docs/
 │   ├── PORTABILITY.md             this document
-│   └── NODE-CONTRACT.md           NEW  the node contract, as built
+│   ├── NODE-CONTRACT.md           NEW  the node contract, as built
+│   └── CODEXIFY.md                NEW  what a full Codexify setup requires
 └── tests/
     ├── test_bootstrap.py          the ladder, idempotency, refusal, redaction
     ├── test_contract.py           help ↔ README ↔ tree agreement
     ├── test_visibility.py         nothing private reaches a public path
     ├── test_keydetect.py          NEW  the format table, the probe, the mask
-    └── test_node.py               NEW  the heartbeat, the join, the export
+    ├── test_node.py               NEW  the heartbeat, the join, the export
+    └── test_codexify.py           NEW  the provisioner, and its refusals
 ```
 
 **What is built, as of this writing.** `setup.sh` and `tools/bootstrap.py`
@@ -383,6 +386,43 @@ These are part of the contract and are covered by the tests.
 | 7 | unsupported substrate — the gateway does not speak Anthropic Messages (§7.3) |
 | 8 | the key did not authenticate — the wizard's refusal. Nothing was written; see `docs/WIZARD.md` §7 |
 | 9 | the wizard's own precondition failed — no TTY for the prompt, or the credential file is not writable |
+
+**`genesis codexify` uses this table too**, so a caller that already reads a
+GENESIS exit code reads that one without learning a second. Two of the
+meanings shift inside it, and only inside it:
+
+- **3** there means *no Codexify installation was found*, not *unsupported
+  host*. On a plain clone `codexify-core/` is empty (F5), and the command
+  says so and names the remedy — `git submodule update --init --recursive`.
+- **5** there means *a prerequisite is missing* — Docker, mostly. The
+  bootstrap's 5 is *no python3*.
+
+### 5.6 `genesis codexify` — the provisioning command
+
+The ladder's `--wizard` writes one credential line into Codexify's `.env`.
+Provisioning Codexify is a larger job than that, and it has its own
+command: `genesis codexify status | setup | down`
+(`docs/CODEXIFY.md`).
+
+It is **self-contained**. It does not go through the ladder's receipt and
+manifest, and it does not add actions to the ladder's plan — the two have
+different jobs and different owners. It does reuse the ladder's exit codes,
+the masking in `tools/keydetect.py`, and the same five rules for a
+credential file: gitignored (verified with `git check-ignore`, not assumed),
+mode 0600, never tracked, never printed, and never in an argument.
+
+It **does not import Codexify**. The submodule is empty on a plain clone
+(F5), so the detection, the environment and the readiness ladder are
+implemented in `src/codexify.py` — standard library only, and hermetic. The
+submodule is treated as a **data** source: its `.env.template` is what a
+complete configuration looks like, and its `docker-compose.yml` is which
+services exist.
+
+**What it owns that the credential wizard does not.** `GUARDIAN_API_KEY` and
+`NEO4J_PASS` are Codexify's own secrets, and compose refuses to start
+without the first. The provisioning command generates them; the operator is
+never asked for either. The credential wizard still never touches them —
+see `docs/WIZARD.md` §4.2 and its amendment.
 
 ---
 
@@ -672,6 +712,17 @@ The root cause of F10 and F11 is that `src/views.py:85` holds a hand-written
 nothing connects them. The fix is not a new table in `tools/` — it is to
 render `_GROUPS` from `COMMANDS`, so a command cannot be registered without
 appearing in the help.
+
+**What is now enforced, and what is still open.** The *invariant* is now a
+test: `tests/test_views.py` asserts that every name in `COMMANDS` appears on
+the help screen, so F10 and F11 cannot reopen silently. A command added to
+the registry without being added to `_GROUPS` now fails the suite.
+
+The *structural* fix — rendering `_GROUPS` from `COMMANDS` rather than
+checking that the two agree — is still open. It was not done here because it
+changes the help screen's own ordering and layout, which is a different
+change from the one that needed doing, and it deserves to be made on its own
+terms rather than as a side effect.
 
 The same principle applies to the bootstrap's own flags: the flag table lives
 in one place, `setup.sh --help` renders it, and the README's flag section is
@@ -1373,6 +1424,12 @@ Still open:
 9. **The `codexify-core` submodule.** A plain clone leaves it empty (F5).
    Should the bootstrap fetch it, or should the README say plainly to clone
    with `--recurse-submodules`?
+   **Partly answered.** `genesis codexify` (§5.6) does not fetch it: it
+   refuses, names the remedy — `git submodule update --init --recursive` —
+   and exits 3. A command that fetched a submodule would be a command that
+   ran the network on the operator's behalf, and the fetch is a decision
+   about the repository, not about the machine. Whether the *bootstrap*
+   should still fetch it is still open.
 10. **Should `landing` move up the help screen?** Once F10 is fixed, `landing`
     lands in the ENGINE group with the other engine commands. It is the
     command a new operator will want, and it currently has no flag of its own
