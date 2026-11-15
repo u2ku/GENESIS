@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import io
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -118,6 +119,18 @@ class WizardCase(unittest.TestCase):
         self.shutil_mock.which.return_value = "/usr/bin/open"
         self.subprocess_mock.Popen.side_effect = \
             lambda argv, **kw: self.opened.append(argv)
+
+        # These tests assert that the wizard *would* open a browser, so
+        # the guard that holds it back when the run is not a person has
+        # to be lifted here — and only here. The suite's own floor is
+        # `GENESIS_NO_BROWSER` (tests/conftest.py); this case is the
+        # one place that says "pretend a person asked for it".
+        env_patcher = mock.patch.dict(os.environ, {
+            "GENESIS_NO_BROWSER": "",
+            "GENESIS_OPEN_BROWSER": "1",
+        })
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
 
         self.out = io.StringIO()
 
@@ -344,6 +357,37 @@ class TestTheFinish(WizardCase):
             self.wizard()
         self.assertEqual(len(self.opened), 1)
         self.assertEqual(self.opened[0][0], "/usr/bin/open")
+
+    def test_the_kill_switch_opens_nothing(self):
+        """GENESIS_NO_BROWSER is how an unattended run says no.
+
+        A test suite and an agent's shell both set it, so neither can
+        put a window on the desk of whoever is sitting at it.
+        """
+        self.find_install[0] = self.installed_d
+        self.setup_done[0] = True
+        with mock.patch.dict(os.environ, {"GENESIS_NO_BROWSER": "1",
+                                          "GENESIS_OPEN_BROWSER": ""}):
+            with mock.patch("sys.stdout", io.StringIO()):
+                code = self.wizard()
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(self.opened, [])
+
+    def test_a_run_with_no_terminal_opens_nothing(self):
+        """A run that is not talking to a person opens no browser.
+
+        A test harness, an agent's shell and a pipeline all look like
+        this: stdout is a pipe, not a terminal. The window would land
+        on a desk without anyone asking for it.
+        """
+        self.find_install[0] = self.installed_d
+        self.setup_done[0] = True
+        with mock.patch.dict(os.environ, {"GENESIS_NO_BROWSER": "",
+                                          "GENESIS_OPEN_BROWSER": ""}):
+            with mock.patch("sys.stdout", io.StringIO()):
+                code = self.wizard()
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(self.opened, [])
 
 
 class TestTheRetryPrompt(WizardCase):

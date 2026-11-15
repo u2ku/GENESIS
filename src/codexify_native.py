@@ -1337,7 +1337,14 @@ LAUNCHER_SCRIPT = """#!/bin/bash
 # API. Opening the API would land a person on a JSON endpoint, which is
 # not the app they came to open.
 if ! curl -s -o /dev/null --max-time 2 http://127.0.0.1:5173/; then
-  "$GENESIS" codexify setup --with-ui >> "$LOG" 2>&1
+  # The launcher owns the opening; the setup it calls never opens one.
+  GENESIS_NO_BROWSER=1 "$GENESIS" codexify setup --with-ui >> "$LOG" 2>&1
+fi
+# The browser is for the person who double-clicked this. A test run or an
+# agent's shell says GENESIS_NO_BROWSER, and then the stack still
+# converges and no window opens on anyone's desk.
+if [ -n "$GENESIS_NO_BROWSER" ]; then
+  exit 0
 fi
 # On a cold start the interface takes a moment to bind -- vite resolves
 # its dependency graph before it will answer -- so it is waited for

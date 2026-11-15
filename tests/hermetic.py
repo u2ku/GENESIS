@@ -45,6 +45,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# The suite must never open a browser on the operator's desk. The
+# wizard's last act is to open the interface, and that is right for a
+# person; a test run is not a person. unittest imports every test
+# module before it runs any of them, so setting this here covers the
+# whole run, and every subprocess it starts inherits it.
+os.environ.setdefault("GENESIS_NO_BROWSER", "1")
+
 # The CLI stub answers `--version` and does nothing else. The wizard asks
 # the CLI two questions: is it on PATH, and what version is it.
 _CLAUDE = """#!/bin/sh

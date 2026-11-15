@@ -857,6 +857,24 @@ def _open_codexify(with_ui: bool):
     """
     url = ("http://127.0.0.1:5173" if with_ui
            else "http://127.0.0.1:8888")
+    if os.environ.get("GENESIS_NO_BROWSER"):
+        print(f"  it is running at {url} — the browser is not opened "
+              "(GENESIS_NO_BROWSER is set).")
+        return
+    # A run with no terminal on it is not a person: a test harness, an
+    # agent's shell, a pipeline. Opening a browser from one of those
+    # puts a window on someone's desk that they did not ask for. A
+    # person in a terminal gets the window; GENESIS_OPEN_BROWSER=1 says
+    # so explicitly for the run that is not one.
+    if not os.environ.get("GENESIS_OPEN_BROWSER"):
+        try:
+            on_a_terminal = sys.stdout.isatty()
+        except (AttributeError, ValueError):
+            on_a_terminal = False
+        if not on_a_terminal:
+            print(f"  it is running at {url} — the browser is not opened "
+                  "(this run is not on a terminal).")
+            return
     opener = shutil.which("open") or shutil.which("xdg-open")
     if not opener:
         print(f"  it is running at {url} — open that in a browser.")
