@@ -607,6 +607,8 @@ def build_environment(install: Path, python: Optional[str] = None,
     Contained: the environment lives inside the installation, in a directory
     that is already gitignored, and removing it removes the whole thing.
     """
+    if not shutil.which("ninja"):
+        return False, "ninja is not installed — please install it via your package manager (e.g., 'sudo pacman -S ninja' or 'brew install ninja')"
     interpreter, note = find_python(python)
     if interpreter is None:
         return False, note
