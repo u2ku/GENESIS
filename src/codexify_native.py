@@ -624,7 +624,7 @@ def build_environment(install: Path, python: Optional[str] = None,
         install, python_version=_python_version(interpreter))
     if not requirements:
         return False, "there is no requirements.txt to install from"
-    done = runner([str(venv_py), "-m", "pip", "install", "--quiet",
+    done = runner([str(venv_py), "-m", "pip", "install", "--no-build-isolation", "--quiet",
                    *requirements], cwd=install, timeout=timeout)
     if done.returncode != 0:
         return False, (done.stderr or done.stdout
