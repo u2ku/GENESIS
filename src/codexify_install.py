@@ -150,7 +150,7 @@ def install(repo: Path, explicit: Optional[str] = None,
     # out submodule costs a few stat calls. It does *not* move an existing
     # checkout to the latest — that is the fetch below, which runs always,
     # so an install is never quietly the stale pinned commit.
-    done = _git(runner, repo, "submodule", "update", "--init", "--recursive",
+    done = _git(runner, repo, "submodule", "update", "--init", "--recursive", "--progress",
                 SUBMODULE, timeout=timeout, stream=stream)
     if done.returncode != 0:
         report.add("the checkout", BAD, _status_text(done)[-300:])
