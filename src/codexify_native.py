@@ -579,8 +579,8 @@ def detect(install: Path, *, python: Optional[str] = None,
     import os
     override_base = os.environ.get("CODEXIFY_RUNTIME_ENDPOINT") or os.environ.get("OPENAI_API_BASE")
     if override_base:
-        # Respect the remote inference node override over Tailscale
-        preset_id, model, base = "remote-tailscale", "supergemma", override_base
+        # Respect the remote inference node override over Tailscale using a valid preset
+        preset_id, model, base = "ollama", os.environ.get("CODEXIFY_MODEL", "supergemma"), override_base
     else:
         preset_id, model, base = codexify.detect_runtime(
         http_getter or codexify._http_get)
