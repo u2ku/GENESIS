@@ -1,0 +1,12 @@
+{
+  "substrate_kind": "gateway",
+  "node_id": "mac-studio-provider",
+  "network": {
+    "overlay": "driftmesh"
+  },
+  "inference": {
+    "engine": "whooshd",
+    "base_url": "http://127.0.0.1:8000/v1",
+    "model": "26b-parameter-model"
+  }
+}
