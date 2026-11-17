@@ -105,7 +105,7 @@ def _status_text(done: subprocess.CompletedProcess) -> str:
 
 def install(repo: Path, explicit: Optional[str] = None,
             runner: CommandRunner = _run_command,
-            timeout: float = 300.0, stream: bool = False) -> Report:
+            timeout: float = 300.0, stream: bool = True) -> Report:
     """Make the installation exist, at the latest upstream main.
 
     The rows report the steps in the order they can be wrong: is the
