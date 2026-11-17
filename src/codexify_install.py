@@ -375,3 +375,31 @@ def apply_vendored_fixes(target: Path) -> tuple[bool, str]:
     if already == len(VENDORED_FIXES):
         return True, "all already applied"
     return False, "; ".join(notes) or "nothing was applied"
+
+
+def prompt_whooshd_manual_config() -> dict:
+    """Interactive wizard step to manually configure remote Whoosh'd inference broker."""
+    print("\n[Whoosh'd Remote Inference Broker Setup]")
+    endpoint = input("  > Enter runtime endpoint URL [http://100.71.144.117:8000/v1]: ").strip() or "http://100.71.144.117:8000/v1"
+    model = input("  > Enter model identifier [supergemma4-26b-uncensored]: ").strip() or "supergemma4-26b-uncensored"
+    return {
+        "OPENAI_API_BASE": endpoint,
+        "CODEXIFY_RUNTIME_ENDPOINT": endpoint,
+        "CODEXIFY_MODEL": model
+    }
+
+
+def main() -> None:
+    """Run the interactive installation wizard with Whoosh'd remote broker configuration."""
+    print("=== Codexify Genesis Installer ===")
+    config = prompt_whooshd_manual_config()
+    env_path = Path(".env")
+    env_lines = [f"{k}={v}" for k, v in config.items()]
+    env_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+    print(f"✅ Wrote remote inference config to {env_path.resolve()}")
+    report = install(Path("."))
+    print(report)
+    raise SystemExit(report.exit_code)
+
+if __name__ == "__main__":
+    main()
