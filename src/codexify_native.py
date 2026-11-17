@@ -576,7 +576,13 @@ def detect(install: Path, *, python: Optional[str] = None,
                     f"pnpm {pnpm}" if pnpm else
                     "pnpm is not here — the API works without it"))
 
-    preset_id, model, base = codexify.detect_runtime(
+    import os
+    override_base = os.environ.get("CODEXIFY_RUNTIME_ENDPOINT") or os.environ.get("OPENAI_API_BASE")
+    if override_base:
+        # Respect the remote inference node override over Tailscale
+        preset_id, model, base = "remote-tailscale", "supergemma", override_base
+    else:
+        preset_id, model, base = codexify.detect_runtime(
         http_getter or codexify._http_get)
     if preset_id:
         rows.append(Row("the local runtime", OK,
