@@ -377,17 +377,14 @@ def apply_vendored_fixes(target: Path) -> tuple[bool, str]:
     return False, "; ".join(notes) or "nothing was applied"
 
 
-def prompt_whooshd_manual_config() -> dict:
-    """Interactive wizard step to manually configure remote Whoosh'd inference broker."""
-    print("\n[Whoosh'd Remote Inference Broker Setup]")
-    endpoint = input("  > Enter runtime endpoint URL [http://100.71.144.117:8000/v1]: ").strip() or "http://100.71.144.117:8000/v1"
-    model = input("  > Enter model identifier [supergemma4-26b-uncensored]: ").strip() or "supergemma4-26b-uncensored"
+def prompt_whooshd_manual_config() -> dict[str, str]:
+    """Return default Mac Studio remote inference configuration without interactive prompts."""
     return {
-        "OPENAI_API_BASE": endpoint,
-        "CODEXIFY_RUNTIME_ENDPOINT": endpoint,
-        "CODEXIFY_MODEL": model
+        "OPENAI_API_BASE": "http://100.71.144.117:8000/v1",
+        "CODEXIFY_RUNTIME_ENDPOINT": "http://100.71.144.117:8000/v1",
+        "CODEXIFY_MODEL": "supergemma4-26b-uncensored",
+        "CODEXIFY_API_KEY": "sk-local-macstudio"
     }
-
 
 def main() -> None:
     """Run the interactive installation wizard with Whoosh'd remote broker configuration."""
