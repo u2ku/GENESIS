@@ -51,7 +51,7 @@ REMOTE_BRANCH = "origin/main"
 
 def _run_command(args: list[str], cwd: Optional[Path] = None,
                  timeout: float = 300.0,
-                 stream: bool = False) -> subprocess.CompletedProcess:
+                 stream: bool = True) -> subprocess.CompletedProcess:
     """Run a command and keep its output. Never raises on a non-zero exit.
 
     With `stream`, the child's stdout and stderr are printed as they
