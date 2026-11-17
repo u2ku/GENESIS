@@ -1,3 +1,4 @@
+from __future__ import annotations
 """CODEXIFY NATIVE — the same system, without Docker.
 
 Docker is the reference setup for Codexify, and it is a good one: twenty-two
@@ -33,7 +34,6 @@ queue, `chat_worker` is still the process that answers a message, and the
 health endpoints still decide whether any of it worked.
 """
 
-from __future__ import annotations
 
 import json
 import os
@@ -56,6 +56,28 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import codexify  # noqa: E402  — the shared types, the masking, the presets
+
+def prompt_and_fix_services(missing: list[str]) -> bool:
+    """Prompt the operator to automatically install and start missing system services."""
+    hints = get_service_hints(missing)
+    if not hints:
+        return True
+
+    print(f"\nMissing system services detected: {', '.join(missing)}")
+    print(f"Proposed commands:\n  {hints}")
+
+    choice = input("\nWould you like to execute these commands automatically? [y/N]: ").strip().lower()
+    if choice in ("y", "yes"):
+        print("Executing system configuration...")
+        done = subprocess.run(hints, shell=True)
+        if done.returncode == 0:
+            print("✓ Services installed and started successfully.")
+            return True
+        else:
+            print("✗ Command execution failed. Please run them manually.")
+            return False
+    return False
+
 
 # --------------------------------------------------------------- the contract --
 
@@ -1093,8 +1115,13 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
     report.add("the installation", OK, str(install))
 
     # -- detect ------------------------------------------------------------
-    for row in detect(install, python=python, runner=runner,
-                       http_getter=http_getter):
+    rows = list(detect(install, python=python, runner=runner, http_getter=http_getter))
+    missing_services = [r.label for r in rows if r.mark == BAD and r.label in ("postgres", "redis")]
+    if missing_services:
+        if prompt_and_fix_services(missing_services):
+            # Re-run detection once services are installed and started
+            rows = list(detect(install, python=python, runner=runner, http_getter=http_getter))
+    for row in rows:
         report.add(row.label, row.mark, row.detail)
 
     blockers = [row for row in report.rows
