@@ -194,24 +194,32 @@ BREW_PACKAGES = {
 BREW_INSTALL = "brew install postgresql@15 redis python@3.11"
 
 
+def get_service_hints(missing: Iterable[str]) -> str:
+    """Return platform-appropriate install and service startup commands for macOS or Arch Linux."""
+    if sys.platform == "darwin":
+        packages = [BREW_PACKAGES[name] for name in missing if name in BREW_PACKAGES]
+        if not packages:
+            return ""
+        commands = ["brew install " + " ".join(packages)]
+        if "postgres" in missing:
+            commands.append("brew services start postgresql@15")
+        if "redis" in missing:
+            commands.append("brew services start redis")
+        return " && ".join(commands)
+    else:
+        commands = []
+        if "postgres" in missing:
+            commands.append("sudo pacman -S --needed postgresql")
+            commands.append("sudo systemctl enable --now postgresql")
+        if "redis" in missing:
+            commands.append("sudo pacman -S --needed redis")
+            commands.append("sudo systemctl enable --now redis")
+        if "python" in missing:
+            commands.append("sudo pacman -S --needed python python-pip")
+        return " && ".join(commands)
+
 def brew_hint(missing: Iterable[str]) -> str:
-    """The commands that provide what is missing, and start it.
-
-    Naming only what is actually absent matters: a machine that already has
-    Python should not be told to install it again.
-
-    Installing and starting a system package is the operator's call. The
-    wizard reports the gap and names the fix; it does not take it.
-    """
-    packages = [BREW_PACKAGES[name] for name in missing if name in BREW_PACKAGES]
-    if not packages:
-        return ""
-    commands = ["brew install " + " ".join(packages)]
-    if "postgres" in missing:
-        commands.append("brew services start postgresql@15")
-    if "redis" in missing:
-        commands.append("brew services start redis")
-    return " && ".join(commands)
+    return get_service_hints(missing)
 
 CommandRunner = Callable[..., subprocess.CompletedProcess]
 HttpGetter = Callable[[str, float], tuple[int, str]]
