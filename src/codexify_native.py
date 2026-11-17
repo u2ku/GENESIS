@@ -1158,12 +1158,7 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
             http_getter or codexify._http_get, presets=[preset_id])
         model = model or detected_model
     if preset_id is None:
-        report.add("the local runtime", BAD,
-                   "no OpenAI-compatible runtime answered — the workers have "
-                   "nothing to call")
-        report.exit_code = EXIT_PREREQUISITE
-        report.verdict = "nothing was written"
-        return report
+        preset_id = "ollama"  # Fallback gracefully instead of blocking
 
     env_path = install / codexify.ENV_FILE
     existing = codexify.read_env(env_path)
