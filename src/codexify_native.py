@@ -232,7 +232,8 @@ def get_service_hints(missing: Iterable[str]) -> str:
         commands = []
         if "postgres" in missing:
             commands.append("sudo pacman -S --needed postgresql")
-            commands.append("sudo systemctl enable --now postgresql")
+            commands.append("sudo -u postgres initdb -D /var/lib/postgres/data")
+        commands.append("sudo systemctl enable --now postgresql")
         if "redis" in missing:
             commands.append("sudo pacman -S --needed redis")
             commands.append("sudo systemctl enable --now redis")
