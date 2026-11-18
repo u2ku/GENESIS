@@ -1907,11 +1907,21 @@ def _install_logo_icon(install: Path) -> Optional[Path]:
     and one without that gets no icon — a cog, not a missing launcher.
     """
     if LOGO_PNG.is_file():
-        target = (Path.home() / ".local" / "share" / "icons" / "hicolor"
-                  / "256x256" / "apps" / "codexify.png")
+        import hashlib
+        apps = (Path.home() / ".local" / "share" / "icons" / "hicolor"
+                / "256x256" / "apps")
+        # The name carries a hash of the picture. A shell caches an icon by
+        # its path and never notices that the file behind the path changed,
+        # so a new logo under the old name keeps showing the old one until
+        # the next login. A new logo under a new name cannot be cached.
+        digest = hashlib.sha256(LOGO_PNG.read_bytes()).hexdigest()[:10]
+        target = apps / f"codexify-{digest}.png"
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
+            apps.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(LOGO_PNG, target)
+            for stale in apps.glob("codexify*.png"):
+                if stale != target:
+                    stale.unlink()
             return target
         except OSError:
             pass

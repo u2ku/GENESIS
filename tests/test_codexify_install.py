@@ -504,9 +504,46 @@ class DesktopEntryCase(unittest.TestCase):
         native.LOGO_PNG = self._real_logo
         self._tmp.cleanup()
 
-    def installed_logo(self):
+    def icon_dir(self):
         return (self.fake_home / ".local" / "share" / "icons" / "hicolor"
-                / "256x256" / "apps" / "codexify.png")
+                / "256x256" / "apps")
+
+    def installed_logo(self):
+        """The one installed icon — its name carries a hash of its content."""
+        found = list(self.icon_dir().glob("codexify-*.png"))
+        self.assertEqual(len(found), 1, found)
+        return found[0]
+
+    def test_a_changed_logo_gets_a_new_path_and_leaves_no_stale_file(self):
+        """The shell caches an icon by path and never notices the file
+        behind it changed: the Arch box pulled the new logo, rewrote the
+        entry, and kept showing the old one. A new logo has to be a new
+        path, and the old file must not pile up beside it."""
+        logo = self.base / "logo.png"
+        logo.write_bytes(b"first-logo")
+        native.LOGO_PNG = logo
+        native.make_launcher(self.install_dir, "desktop",
+                             genesis_bin=str(self.genesis))
+        first = self.installed_logo()
+        logo.write_bytes(b"second-logo")
+        native.make_launcher(self.install_dir, "desktop",
+                             genesis_bin=str(self.genesis))
+        second = self.installed_logo()          # exactly one is left
+        self.assertNotEqual(first, second)
+        self.assertEqual(second.read_bytes(), b"second-logo")
+        self.assertFalse(first.exists())
+        self.assertIn("Icon=" + str(second), self.entry().read_text())
+
+    def test_an_unchanged_logo_keeps_its_path(self):
+        logo = self.base / "logo.png"
+        logo.write_bytes(b"same-logo")
+        native.LOGO_PNG = logo
+        native.make_launcher(self.install_dir, "desktop",
+                             genesis_bin=str(self.genesis))
+        first = self.installed_logo()
+        native.make_launcher(self.install_dir, "desktop",
+                             genesis_bin=str(self.genesis))
+        self.assertEqual(self.installed_logo(), first)
 
     def test_the_entry_does_not_promise_a_window_it_cannot_deliver(self):
         """The tile opens a tab in the person's own browser, a window that
