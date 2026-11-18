@@ -135,7 +135,10 @@ def kokoro_python_path() -> Path:
 
 # The one release that matches Luna's working venv, so the voice is the
 # same voice on every machine: kokoro-onnx 0.5.0 against model-files-v1.0.
-KOKORO_PIP_PIN = "kokoro-onnx==0.5.0"
+# A floor, not an equality: 0.5.0 is what Luna's Mac venv runs, but it
+# declares Requires-Python <3.13 and Arch ships newer — 0.6.1 lifts the
+# ceiling. The model files and the Kokoro API are one across the range.
+KOKORO_PIP_PIN = "kokoro-onnx>=0.5.0,<1.0"
 KOKORO_MODEL_URL = ("https://github.com/thewh1teagle/kokoro-onnx/"
                     "releases/download/model-files-v1.0/kokoro-v1.0.onnx")
 KOKORO_VOICES_URL = ("https://github.com/thewh1teagle/kokoro-onnx/"

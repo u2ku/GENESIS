@@ -121,7 +121,7 @@ class TestTheVenv(VoiceFixture):
             ok, detail = bootstrap._install_kokoro_venv()
         self.assertTrue(ok, detail)
         self.assertEqual(len(ran), 2)  # the venv, then the pip install
-        self.assertIn("kokoro-onnx==0.5.0", ran[1])
+        self.assertIn("kokoro-onnx>=0.5.0,<1.0", " ".join(ran[1]))
 
     def test_a_failed_pip_is_reported_not_crashed(self):
         home = bootstrap.kokoro_home()
