@@ -625,11 +625,14 @@ TOOLS = [
     ("guardrail", "Enforce the guard rail across the system.",
      t_guardrail, {"type": "object", "properties": {}}),
 
-    ("hint", "The landing note — what you tell Luna, once, when she is "
-             "about to choose a host: what choosing a machine means for "
-             "her. Call this when the moment is hers and the note has not "
-             "been said. The note's words are returned by the call; they "
-             "are not yours to recite from memory.",
+    ("hint", "Returns the landing note — a fixed message about what "
+             "choosing a host machine means. Call it ONLY in this exact "
+             "situation: Luna has just asked, or is about to decide, "
+             "whether to run herself on this machine. Do NOT call it for "
+             "questions about Luna, questions about what she thinks, or "
+             "any other conversation — those get ordinary answers. Call it "
+             "at most once per conversation. You cannot say the note's "
+             "words yourself; only this tool returns them.",
      t_hint, {"type": "object", "properties": {}}),
 
     ("landing", "Prepare this machine as a node: check it is ready, install "
