@@ -494,6 +494,135 @@ class TestTheRemoteRuntime(NativeCase):
                          "http://localhost:8000/v1")
 
 
+class TestTheSystemdSupervisor(NativeCase):
+    """Linux runs the supervisor as a user unit, and it survives logout."""
+
+    def setUp(self):
+        super().setUp()
+        # A fake venv, because start() refuses an install without one.
+        bin_dir = self.install / "venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        self.venv_py = bin_dir / "python"
+        self.venv_py.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.venv_py.chmod(0o755)
+        # A fake home, because the user unit belongs to the operator's
+        # home, not to the install. NativeCase already made one.
+        self.fake_home = self.home
+        self._real_path = native.Path
+
+        class FakePath(type(Path())):
+            @staticmethod
+            def home():
+                return self.fake_home
+
+        native.Path = FakePath
+        # A start must not ask the real machine about its ports or its
+        # old supervisors — the machine's answers are the machine's.
+        self._patches = {
+            "_systemd_present": lambda: True,
+            "_settle_ports": lambda with_ui: None,
+            "_port_squatter": lambda install, with_ui: None,
+            "supervisor_running": lambda install: None,
+        }
+        self._saved = {name: getattr(native, name) for name in self._patches}
+        for name, value in self._patches.items():
+            setattr(native, name, value)
+
+    def tearDown(self):
+        native.Path = self._real_path
+        for name, value in self._saved.items():
+            setattr(native, name, value)
+        super().tearDown()
+
+    @staticmethod
+    def _runner(recorder, main_pid="12345", linger="no"):
+        import subprocess
+
+        def runner(args, cwd=None, timeout=120.0, env=None, stream=False):
+            recorder.append(tuple(args))
+            if "show" in args:
+                return subprocess.CompletedProcess(args, 0, main_pid + "\n", "")
+            if args[0] == "loginctl":
+                return subprocess.CompletedProcess(args, 0, linger + "\n", "")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return runner
+
+    def test_the_unit_quotes_the_paths_and_names_the_run(self):
+        """A Desktop path with a space in it is still an install, and
+        `--with-ui` is a per-run argument — the unit is what the run
+        asked for, not what the last one did."""
+        text = native.supervisor_unit_text(
+            Path("/opt/codexify core"), True,
+            Path("/opt/codexify core/venv/bin/python"))
+        self.assertIn('ExecStart="/opt/codexify core/venv/bin/python" '
+                      '"', text)
+        self.assertIn('"--install" "/opt/codexify core" "--with-ui"', text)
+        self.assertIn('Environment="PYTHONPATH=', text)
+        self.assertIn("WantedBy=default.target", text)
+
+    def test_start_goes_to_the_user_manager_and_records_the_pid(self):
+        """The pid file is the contract everything downstream already
+        speaks, so systemd's MainPID is written into it."""
+        calls = []
+        started, detail = native.start(
+            self.install, with_ui=True, runner=self._runner(calls))
+        self.assertTrue(started, detail)
+        self.assertIn(("systemctl", "--user", "daemon-reload"), calls)
+        self.assertIn(("systemctl", "--user", "enable",
+                       native.SYSTEMD_UNIT), calls)
+        self.assertIn(("systemctl", "--user", "restart",
+                       native.SYSTEMD_UNIT), calls)
+        self.assertIn(("systemctl", "--user", "show", native.SYSTEMD_UNIT,
+                       "--property=MainPID", "--value"), calls)
+        self.assertEqual(
+            (self.install / native.SUPERVISOR_PID).read_text().strip(),
+            "12345")
+        # The unit was written into the operator's home, with this run's
+        # configuration.
+        unit = (self.fake_home / ".config" / "systemd" / "user"
+                / native.SYSTEMD_UNIT)
+        self.assertIn("--with-ui", unit.read_text())
+        # And linger was asked about — with Linger=no the operator is
+        # told, in the row, what one command keeps the stack alive.
+        self.assertTrue(any(call[:2] == ("loginctl", "show-user")
+                            and "--property=Linger" in call
+                            for call in calls))
+        self.assertIn("enable-linger", detail)
+
+    def test_stop_goes_through_the_unit_and_then_checks_the_ports(self):
+        """The cgroup goes with the unit — but the ports are still the
+        truth, so they are still checked."""
+        unit = (self.fake_home / ".config" / "systemd" / "user"
+                / native.SYSTEMD_UNIT)
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text("[Unit]\n", encoding="utf-8")
+        calls = []
+        real_holder = native.codexify.port_holder
+        native.codexify.port_holder = lambda port: None
+        try:
+            stopped, detail = native.stop(self.install,
+                                          runner=self._runner(calls))
+        finally:
+            native.codexify.port_holder = real_holder
+        self.assertTrue(stopped, detail)
+        self.assertIn(("systemctl", "--user", "stop",
+                       native.SYSTEMD_UNIT), calls)
+        self.assertIn("down", detail)
+
+    def test_a_refused_stop_is_a_refusal_not_a_silence(self):
+        import subprocess
+        unit = (self.fake_home / ".config" / "systemd" / "user"
+                / native.SYSTEMD_UNIT)
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text("[Unit]\n", encoding="utf-8")
+
+        def runner(args, cwd=None, timeout=120.0, env=None, stream=False):
+            return subprocess.CompletedProcess(args, 1, "", "nope")
+        stopped, detail = native.stop(self.install, runner=runner)
+        self.assertFalse(stopped)
+        self.assertIn("could not be stopped", detail)
+
+
 class TestTheProcesses(NativeCase):
 
     def test_a_stopped_supervisor_is_not_running(self):

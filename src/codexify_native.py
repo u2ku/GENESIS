@@ -1025,6 +1025,126 @@ def _settle_ports(with_ui: bool) -> None:
         time.sleep(0.2)
 
 
+# On a Linux with systemd, the supervisor is a user unit, not a detached
+# process. A detached process survives a terminal's HUP but not the
+# logout — systemd-logind kills the user scope, and Arch ships
+# KillUserProcesses=yes — so a wizard that started one gave Sam a stack
+# that died the moment he closed the terminal. A user unit is the
+# pattern the heartbeat daemon already uses (node.py): launchd on macOS,
+# `systemd --user` on Linux, never a system one, and no root for the
+# service itself.
+SYSTEMD_UNIT = "codexify-supervisor.service"
+
+
+def _unit_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / SYSTEMD_UNIT
+
+
+def _systemd_present() -> bool:
+    """Is this a Linux whose user manager can take the unit?
+
+    A `which` is a PATH scan, not an execution — the hermetic contract
+    (systemctl is a SYSTEM stub; the install must never happen) is kept
+    by never running it in a test, only asking whether it is there.
+    """
+    return sys.platform != "darwin" and shutil.which("systemctl") is not None
+
+
+def supervisor_unit_text(install: Path, with_ui: bool,
+                         python: Path) -> str:
+    """The user unit that runs the supervisor.
+
+    The unit is rewritten on every start — `--with-ui` is a per-run
+    argument, and a unit left over from a previous run is a unit that
+    serves yesterday's configuration. Paths are quoted: an install under
+    a Desktop path with spaces in the name is still an install.
+    """
+    exec_args = [str(python), str(SUPERVISOR), "--install", str(install)]
+    if with_ui:
+        exec_args.append("--with-ui")
+    quoted = " ".join(f'"{arg}"' for arg in exec_args)
+    return (
+        "[Unit]\n"
+        "Description=Codexify native supervisor "
+        "(the backend, the workers, the interface)\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"WorkingDirectory={install}\n"
+        f'Environment="PYTHONPATH={TOOLS}"\n'
+        f"ExecStart={quoted}\n"
+        "Restart=on-failure\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def _linger_enabled(runner: CommandRunner) -> bool:
+    """Does this user's manager survive logout?
+
+    A user manager without lingering dies at logout and takes its units
+    with it — the very death the unit exists to prevent. A manager that
+    cannot be asked (no answer, no loginctl) is not nagged about: the
+    note is for a user we could read, not one we could not.
+    """
+    user = os.environ.get("USER") or ""
+    done = runner(["loginctl", "show-user", user,
+                   "--property=Linger", "--value"], timeout=15.0)
+    if done.returncode != 0:
+        return True
+    return (done.stdout or "").strip().lower() == "yes"
+
+
+def _start_under_systemd(install: Path, with_ui: bool,
+                         runner: CommandRunner, python: Path) -> tuple[bool, str]:
+    """Start the supervisor as a user unit, and record its pid.
+
+    The pid file is the contract everything else already speaks —
+    `supervisor_running`, the process rows, the stop escalation — so
+    systemd's MainPID is written into it and nothing downstream has to
+    know a unit from a Popen. `enable` makes it start at boot; `restart`
+    converges a unit whose configuration this start just rewrote.
+    """
+    unit = _unit_path()
+    try:
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(supervisor_unit_text(install, with_ui, python),
+                        encoding="utf-8")
+    except OSError as exc:
+        return False, f"the user unit could not be written: {exc}"
+
+    for args in (["systemctl", "--user", "daemon-reload"],
+                 ["systemctl", "--user", "enable", SYSTEMD_UNIT],
+                 ["systemctl", "--user", "restart", SYSTEMD_UNIT]):
+        done = runner(args, cwd=install, timeout=60.0)
+        if done.returncode != 0:
+            return False, (done.stderr or done.stdout or
+                           f"{' '.join(args)} failed").strip()[-300:]
+
+    pid = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        done = runner(["systemctl", "--user", "show", SYSTEMD_UNIT,
+                       "--property=MainPID", "--value"], timeout=15.0)
+        text = (done.stdout or "").strip()
+        if text.isdigit() and int(text) > 0:
+            pid = int(text)
+            break
+        time.sleep(0.5)
+    if pid is None:
+        return False, ("the unit was started but systemd never reported a "
+                       "main pid — try `systemctl --user status "
+                       + SYSTEMD_UNIT + "`")
+
+    (install / SUPERVISOR_PID).write_text(f"{pid}\n", encoding="utf-8")
+    detail = f"the supervisor is running under systemd --user (pid {pid})"
+    if not _linger_enabled(runner):
+        detail += (" — it dies at logout until "
+                   "`sudo loginctl enable-linger $USER` is run once")
+    return True, detail
+
+
 def start(install: Path, with_ui: bool = False,
           runner: CommandRunner = _run_command) -> tuple[bool, str]:
     """Start the backend and the workers, under one supervisor."""
@@ -1059,6 +1179,13 @@ def start(install: Path, with_ui: bool = False,
             supervisor_pid_file.unlink()
         except OSError:
             pass
+
+    # Linux with systemd: the supervisor goes to the user manager, so
+    # it survives the terminal that started it. Everything else — the
+    # macOS path, a Linux without systemd — keeps the detached process.
+    if _systemd_present():
+        return _start_under_systemd(install, with_ui, runner,
+                                     venv_python(install))
 
     args = [get_stable_python(), str(SUPERVISOR), "--install", str(install)]
     if with_ui:
@@ -1108,7 +1235,7 @@ def _stop_child_groups(install: Path, pids: list[int]) -> None:
                 break
 
 
-def stop(install: Path) -> tuple[bool, str]:
+def stop(install: Path, runner: CommandRunner = _run_command) -> tuple[bool, str]:
     """Stop the supervisor, and with it everything it started.
 
     A supervisor with five children takes real seconds to die — SIGTERM
@@ -1117,6 +1244,12 @@ def stop(install: Path) -> tuple[bool, str]:
     then with SIGKILL, and it reports what actually happened. A stop
     that gives up waiting but says "down" puts the next start in the
     impossible position of refusing a supervisor it was told was gone.
+
+    Under systemd the stop is the unit's stop — the cgroup is the whole
+    stack, and the children the supervisor would have reaped one by one
+    go with it. The leftovers are still cleaned up by hand after, and
+    the ports are still checked, because a cgroup that has been told to
+    stop is not a cgroup that has finished stopping.
 
     The children are stopped whether or not the supervisor is alive. A
     supervisor that was killed before its own cleanup ran leaves them
@@ -1132,9 +1265,21 @@ def stop(install: Path) -> tuple[bool, str]:
     """
     pid = supervisor_running(install)
     children = _child_pids(install)
-    if pid is None and not children:
+    stopped_by_systemd = False
+    if _systemd_present() and _unit_path().is_file():
+        done = runner(["systemctl", "--user", "stop", SYSTEMD_UNIT],
+                      timeout=120.0)
+        if done.returncode != 0:
+            return False, ("the supervisor could not be stopped: "
+                          "`systemctl --user stop` failed — "
+                          + (done.stderr or done.stdout or "").strip()[-200:])
+        stopped_by_systemd = True
+        # The cgroup went with the unit; read the pid again before the
+        # polite-kill block mistakes a dead man for a runaway.
+        pid = supervisor_running(install)
+    if pid is None and not children and not stopped_by_systemd:
         return False, "the native supervisor is not running"
-    if pid is not None:
+    if pid is not None and not stopped_by_systemd:
         try:
             os.kill(pid, 15)
         except OSError as exc:
