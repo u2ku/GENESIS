@@ -204,6 +204,33 @@ class VendoredFixCase(RepoCase):
         (hook / "useThemeController.ts").write_text(
             fixed_hook if fixed else broken_hook, encoding="utf-8")
 
+        fixed_workspace = ("packages:\n"
+                           "  - frontend/src\n"
+                           "  - edge/cloudflare-worker\n"
+                           "allowBuilds:\n"
+                           "  '@tailwindcss/oxide': true\n"
+                           "  esbuild: true\n")
+        broken_workspace = fixed_workspace.replace(
+            "'@tailwindcss/oxide': true",
+            "'@tailwindcss/oxide': set this to true or false").replace(
+            "esbuild: true", "esbuild: set this to true or false")
+        (self.sub / "pnpm-workspace.yaml").write_text(
+            fixed_workspace if fixed else broken_workspace, encoding="utf-8")
+
+    def test_the_pnpm_policy_placeholders_become_booleans(self):
+        """Upstream shipped literal 'set this to true or false' in the
+        build-approval map — pnpm 10 parses those values as booleans
+        and dies before installing anything. The fix makes them true,
+        which the tools also need: their postinstall builds are what
+        the dev server runs on."""
+        self.write_fixture(fixed=False)
+        ok, note = ci.apply_vendored_fixes(self.sub)
+        self.assertTrue(ok, note)
+        text = (self.sub / "pnpm-workspace.yaml").read_text()
+        self.assertIn("'@tailwindcss/oxide': true", text)
+        self.assertIn("esbuild: true", text)
+        self.assertNotIn("set this to true or false", text)
+
     def pgdb(self, fixed=False):
         """The old name, kept for the tests that only care about pgdb."""
         self.write_fixture(fixed=fixed)

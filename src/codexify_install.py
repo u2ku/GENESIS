@@ -345,6 +345,22 @@ VENDORED_FIXES = (
       return coerceMode(fallback);
     }''',
     },
+    {
+        "file": "pnpm-workspace.yaml",
+        "why": ("upstream left literal placeholders in the build-approval "
+                "map — pnpm 10's package-manager-policy reader parses the "
+                "values as booleans and dies with 'expected value at line "
+                "1 column 1' before installing anything; the container "
+                "never saw it because its build only copies frontend/. "
+                "Both tools need their postinstall builds for the dev "
+                "server to run, so the values become true"),
+        "find": """allowBuilds:
+  '@tailwindcss/oxide': set this to true or false
+  esbuild: set this to true or false""",
+        "replace": """allowBuilds:
+  '@tailwindcss/oxide': true
+  esbuild: true""",
+    },
 )
 
 
