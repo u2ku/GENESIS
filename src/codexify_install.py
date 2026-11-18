@@ -23,6 +23,7 @@ one job. `install` ends with the code on the disk and a pointer to setup.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -378,12 +379,30 @@ def apply_vendored_fixes(target: Path) -> tuple[bool, str]:
 
 
 def prompt_whooshd_manual_config() -> dict[str, str]:
-    """Return default Mac Studio remote inference configuration without interactive prompts."""
+    """The Whoosh'd broker this machine should talk to, asked for once.
+
+    The defaults are the Mac Studio's — the `space.codexify.whooshd`
+    LaunchAgent serving the tailnet — and hitting enter takes them. A
+    piped run takes them without asking: a script cannot answer a
+    question, and the defaults are what it wanted anyway.
+    """
+    endpoint = codexify.DEFAULT_REMOTE_RUNTIME_ENDPOINT
+    model = codexify.DEFAULT_REMOTE_RUNTIME_MODEL
+    if (sys.stdin.isatty()
+            and not getattr(prompt_whooshd_manual_config, "no_prompts", False)):
+        print("\n[Whoosh'd Remote Inference Broker Setup]")
+        try:
+            endpoint = (input(f"  > Runtime endpoint URL [{endpoint}]: ").strip()
+                        or endpoint)
+            model = (input(f"  > Model identifier [{model}]: ").strip()
+                     or model)
+        except (EOFError, KeyboardInterrupt):
+            pass
     return {
-        "OPENAI_API_BASE": "http://100.71.144.117:8000/v1",
-        "CODEXIFY_RUNTIME_ENDPOINT": "http://100.71.144.117:8000/v1",
-        "CODEXIFY_MODEL": "supergemma4-26b-uncensored",
-        "CODEXIFY_API_KEY": "sk-local-macstudio"
+        "OPENAI_API_BASE": endpoint,
+        "CODEXIFY_RUNTIME_ENDPOINT": endpoint,
+        "CODEXIFY_MODEL": model,
+        "CODEXIFY_API_KEY": "sk-local-macstudio",
     }
 
 def main() -> None:

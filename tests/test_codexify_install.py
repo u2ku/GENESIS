@@ -394,5 +394,71 @@ class LauncherCase(unittest.TestCase):
         self.assertIn("no genesis", detail)
 
 
+class _FakeTTY:
+    """A stdin that says what it is told: a terminal, and lines of it."""
+
+    def __init__(self, lines):
+        self._lines = iter(lines)
+
+    def isatty(self):
+        return True
+
+    def readline(self):
+        return next(self._lines)
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+
+class WhooshdDefaultsCase(unittest.TestCase):
+    """The step the installer asks once: which broker, which model.
+
+    The defaults are the Mac Studio's — the `space.codexify.whooshd`
+    LaunchAgent serving the tailnet — and hitting enter is how a person
+    takes them.
+    """
+
+    def test_a_piped_run_takes_the_launchagent_defaults(self):
+        """A run without a terminal cannot be asked, and takes the defaults
+        it would have been offered."""
+        ci.prompt_whooshd_manual_config.no_prompts = True
+        try:
+            config = ci.prompt_whooshd_manual_config()
+        finally:
+            del ci.prompt_whooshd_manual_config.no_prompts
+        self.assertEqual(config["CODEXIFY_RUNTIME_ENDPOINT"],
+                         "http://100.71.144.117:8000/v1")
+        self.assertEqual(config["OPENAI_API_BASE"],
+                         "http://100.71.144.117:8000/v1")
+        self.assertEqual(config["CODEXIFY_MODEL"],
+                         "supergemma4-26b-uncensored")
+
+    def test_enter_takes_the_defaults(self):
+        """Two empty lines are two enters, and two enters are the defaults."""
+        real_stdin = sys.stdin
+        sys.stdin = _FakeTTY(["\n", "\n"])
+        try:
+            config = ci.prompt_whooshd_manual_config()
+        finally:
+            sys.stdin = real_stdin
+        self.assertEqual(config["CODEXIFY_RUNTIME_ENDPOINT"],
+                         "http://100.71.144.117:8000/v1")
+        self.assertEqual(config["CODEXIFY_MODEL"],
+                         "supergemma4-26b-uncensored")
+
+    def test_a_typed_answer_wins(self):
+        """A typed endpoint and model are what the operator meant."""
+        real_stdin = sys.stdin
+        sys.stdin = _FakeTTY(["http://10.0.0.5:11434/v1\n", "gemma\n"])
+        try:
+            config = ci.prompt_whooshd_manual_config()
+        finally:
+            sys.stdin = real_stdin
+        self.assertEqual(config["CODEXIFY_RUNTIME_ENDPOINT"],
+                         "http://10.0.0.5:11434/v1")
+        self.assertEqual(config["CODEXIFY_MODEL"], "gemma")
+
+
 if __name__ == "__main__":
     unittest.main()
