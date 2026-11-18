@@ -1703,6 +1703,11 @@ def down(install: Optional[Path], explicit: Optional[str] = None) -> Report:
 
 LAUNCHER_APPS = ("Applications", "Desktop")
 LAUNCHER_ID = "com.genesis.codexify"
+# The official logo, vendored here — not read out of the submodule, whose
+# frontend icons are upstream's and die with the next checkout. A drop-in
+# replacement at the same two paths is the whole of changing the logo.
+LOGO_PNG = ROOT / "assets" / "codexify-icon.png"
+LOGO_ICNS = ROOT / "assets" / "codexify.icns"
 # One body, two openers: the Mac bundle says `open`, a freedesktop
 # entry says `xdg-open`. Everything else — the converge-if-not-answering,
 # the GENESIS_NO_BROWSER contract, the wait for vite to bind, the API as
@@ -1805,6 +1810,11 @@ def make_launcher(install: Path, where: str,
             "    <key>CFBundleIconFile</key><string>app</string>\n"
             "</dict>\n"
             "</plist>\n", encoding="utf-8")
+        # The plist names `app` as the icon; this is the file it names.
+        # A checkout without the logo makes a working bundle, not none.
+        if LOGO_ICNS.is_file():
+            shutil.copyfile(LOGO_ICNS, root / "Contents" / "Resources"
+                            / "app.icns")
         script = (root / "Contents" / "MacOS" / "Codexify")
         script.write_text(
             LAUNCHER_SCRIPT.replace("$GENESIS", genesis_bin)
@@ -1851,6 +1861,31 @@ def _desktop_entry_text(install: Path, script: Path, icon: Optional[Path],
     return "\n".join(lines) + "\n"
 
 
+def _install_logo_icon(install: Path) -> Optional[Path]:
+    """Put the official logo where the grid can find it, and say where.
+
+    The logo is copied into the user's own icon directory rather than
+    pointed at in the clone: the entry must keep its icon when GENESIS is
+    moved or re-cloned, and the user icon directory is where the
+    freedesktop spec says a user's icons live. The path is absolute, so
+    the tile needs no icon-cache refresh to show it.
+
+    A checkout without the logo falls back to the icon the frontend ships,
+    and one without that gets no icon — a cog, not a missing launcher.
+    """
+    if LOGO_PNG.is_file():
+        target = (Path.home() / ".local" / "share" / "icons" / "hicolor"
+                  / "256x256" / "apps" / "codexify.png")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(LOGO_PNG, target)
+            return target
+        except OSError:
+            pass
+    fallback = install / "frontend" / "src" / "public" / "icons" / "icon-512.png"
+    return fallback if fallback.is_file() else None
+
+
 def _make_desktop_entry(install: Path, where: str, genesis_bin: str,
                         log_dir: Optional[Path]) -> tuple[bool, str]:
     """The Linux launcher: a freedesktop entry, and the script behind it.
@@ -1859,9 +1894,9 @@ def _make_desktop_entry(install: Path, where: str, genesis_bin: str,
     there is no Desktop/Applications choice to make on a freedesktop
     desktop; the grid is the grid. The entry goes where the spec says
     user entries go (`~/.local/share/applications`), the script lives
-    with the install's own runtime files, and the icon is the one the
-    frontend already ships — an install that has no frontend icon yet
-    gets an entry without one rather than no entry at all.
+    with the install's own runtime files, and the icon is the official
+    logo — an install with no logo and no frontend icon gets an entry
+    without one rather than no entry at all.
 
     Both files are written atomically, and an entry that already exists
     is converged, not refused: the wizard re-runs, the entry points at
@@ -1883,8 +1918,7 @@ def _make_desktop_entry(install: Path, where: str, genesis_bin: str,
         except OSError as exc:
             return False, f"the launcher's directory could not be made: {exc}"
 
-    icon = install / "frontend" / "src" / "public" / "icons" / "icon-512.png"
-    icon = icon if icon.is_file() else None
+    icon = _install_logo_icon(install)
 
     import tempfile
     # The script first: the entry is dead weight until the script exists,

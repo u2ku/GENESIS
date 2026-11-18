@@ -358,10 +358,37 @@ class LauncherCase(unittest.TestCase):
                 return self.fake_home
 
         native.Path = FakePath
+        # make_launcher branches on the platform; this case is the Mac's.
+        self._real_platform = native.sys.platform
+        native.sys.platform = "darwin"
+        self._real_icns = native.LOGO_ICNS
+        native.LOGO_ICNS = self.base / "no-such-logo.icns"
 
     def tearDown(self):
         native.Path = self._real_path
+        native.sys.platform = self._real_platform
+        native.LOGO_ICNS = self._real_icns
         self._tmp.cleanup()
+
+    def test_the_bundle_carries_the_official_logo(self):
+        """The plist names `app` as the icon, and until the logo shipped
+        nothing ever wrote that file — the bundle was iconless."""
+        logo = self.base / "logo.icns"
+        logo.write_bytes(b"icns-bytes")
+        native.LOGO_ICNS = logo
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        icon = (self.fake_home / "Desktop" / "Codexify.app" / "Contents"
+                / "Resources" / "app.icns")
+        self.assertEqual(icon.read_bytes(), b"icns-bytes")
+
+    def test_a_bundle_without_the_logo_is_still_made(self):
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        self.assertFalse((self.fake_home / "Desktop" / "Codexify.app"
+                          / "Contents" / "Resources" / "app.icns").exists())
 
     def test_the_launcher_is_made_on_the_desktop(self):
         made, detail = native.make_launcher(self.install_dir, "desktop",
@@ -465,12 +492,48 @@ class DesktopEntryCase(unittest.TestCase):
         # The icon probe must not find the real machine's frontend.
         self._real_which = native.shutil.which
         native.shutil.which = lambda name: None
+        # Nor the repo's real logo: these tests are about the fallbacks
+        # until one of them says otherwise.
+        self._real_logo = native.LOGO_PNG
+        native.LOGO_PNG = self.base / "no-such-logo.png"
 
     def tearDown(self):
         native.Path = self._real_path
         native.sys.platform = self._real_platform
         native.shutil.which = self._real_which
+        native.LOGO_PNG = self._real_logo
         self._tmp.cleanup()
+
+    def installed_logo(self):
+        return (self.fake_home / ".local" / "share" / "icons" / "hicolor"
+                / "256x256" / "apps" / "codexify.png")
+
+    def test_the_official_logo_is_the_entry_icon(self):
+        """The logo is copied into the user's icon directory — so the tile
+        keeps it when GENESIS is moved or re-cloned — and it wins over the
+        frontend's own icon even when both are there."""
+        logo = self.base / "logo.png"
+        logo.write_bytes(b"official-logo")
+        native.LOGO_PNG = logo
+        icons = (self.install_dir / "frontend" / "src" / "public" / "icons")
+        icons.mkdir(parents=True)
+        (icons / "icon-512.png").write_bytes(b"upstream")
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        self.assertEqual(self.installed_logo().read_bytes(), b"official-logo")
+        entry = self.entry().read_text()
+        self.assertIn("Icon=" + str(self.installed_logo()), entry)
+        self.assertNotIn("icon-512", entry)
+
+    def test_the_repo_ships_a_real_logo(self):
+        """The assets are vendored, and a checkout that lost them would
+        quietly fall back to upstream's icon — so their existence is a
+        test, not a hope. The format is checked by its magic bytes."""
+        png = self._real_logo.read_bytes()
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+        icns = self._real_logo.with_name("codexify.icns")
+        self.assertEqual(icns.read_bytes()[:4], b"icns")
 
     def entry(self):
         return (self.fake_home / ".local" / "share" / "applications"
