@@ -33,7 +33,7 @@ import codexify_native as native  # noqa: E402
 
 
 SUBMODULE_UPDATE = ("submodule", "update", "--init", "--recursive",
-                    "--progress", "codexify-core")
+                    "--quiet", "codexify-core")
 
 
 class GitAnswers:
@@ -46,7 +46,7 @@ class GitAnswers:
         self.calls = []
 
     def __call__(self, args, cwd=None, timeout=300.0, env=None,
-                 stream=False):
+                 stream=False, label=None):
         key = tuple(args[3:])
         self.calls.append(key)
         if self.make_install and key == SUBMODULE_UPDATE:
@@ -123,9 +123,9 @@ class InstallCase(RepoCase):
 
     def test_install_reports_a_failed_fetch(self):
         """The network is a prerequisite, and its failure says so."""
-        runner = self.git_ok(fail={("submodule", "foreach",
-                                   "git fetch origin main"),
-                                   ("fetch", "origin", "main")})
+        runner = self.git_ok(fail={("submodule", "foreach", "--quiet",
+                                   "git fetch --quiet origin main"),
+                                   ("fetch", "--quiet", "origin", "main")})
         report = ci.install(self.repo, runner=runner)
         self.assertEqual(report.exit_code, codexify.EXIT_PREREQUISITE)
         self.assertTrue(any("upstream" in row.detail for row in report.rows))
@@ -171,17 +171,18 @@ class InstallCase(RepoCase):
             timeouts = {}
 
             def __call__(self, args, cwd=None, timeout=300.0, env=None,
-                         stream=False):
+                         stream=False, label=None):
                 self.timeouts[tuple(args[3:])] = timeout
                 return super().__call__(args, cwd=cwd, timeout=timeout,
-                                        env=env, stream=stream)
+                                        env=env, stream=stream, label=label)
 
         plain = self.git_ok()
         runner = Timed(plain.answers, make_install=plain.make_install)
         report = ci.install(self.repo, runner=runner)
         self.assertEqual(report.exit_code, codexify.EXIT_OK)
         for step in (SUBMODULE_UPDATE,
-                     ("submodule", "foreach", "git fetch origin main")):
+                     ("submodule", "foreach", "--quiet",
+                      "git fetch --quiet origin main")):
             self.assertGreaterEqual(runner.timeouts[step], 3600.0, step)
 
     def test_a_timeout_says_how_long_it_waited(self):

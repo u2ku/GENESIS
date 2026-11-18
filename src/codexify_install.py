@@ -66,7 +66,8 @@ NETWORK_TIMEOUT = 3600.0
 
 def _run_command(args: list[str], cwd: Optional[Path] = None,
                  timeout: float = 300.0,
-                 stream: bool = True) -> subprocess.CompletedProcess:
+                 stream: bool = True,
+                 label: Optional[str] = None) -> subprocess.CompletedProcess:
     """Run a command and keep its output. Never raises on a non-zero exit.
 
     With `stream`, the child's stdout and stderr are printed as they
@@ -74,13 +75,10 @@ def _run_command(args: list[str], cwd: Optional[Path] = None,
     otherwise, and the wizard's contract is that the operator sees
     everything the machine is doing.
 
-    Even streamed, a command can go quiet for a long spell — a fetch
-    over a slow link, a clone of a filtered tree — and a terminal that
-    says nothing reads as a stall. So a streamed command that is allowed
-    more than a few minutes gets the spinner, on stderr, redrawn on the
-    same line: the child's own lines land whole above it, and when the
-    command ends the line is cleared. A pipe gets no spinner, because a
-    spinner in a log is noise, not progress.
+    `label` is what the spinner says while it runs: the step in plain
+    words — "fetching the codexify-core submodule" — rather than the
+    command's own name, because a name tells the operator what was
+    typed, not what is happening.
 
     The child leads a process group of its own, and a timeout or a Ctrl+C
     takes the whole group down. `git submodule update` runs `git clone`,
@@ -92,11 +90,8 @@ def _run_command(args: list[str], cwd: Optional[Path] = None,
     stop = threading.Event()
     thread = None
     if spin:
-        label = Path(args[0]).name if args else ""
-        if len(args) > 1 and "submodule" in args:
-            label = "git submodule"
         thread = threading.Thread(
-            target=_spin_stderr, args=(stop, label), daemon=True)
+            target=_spin_stderr, args=(stop, label or "working"), daemon=True)
         thread.start()
     try:
         proc = subprocess.Popen(
@@ -129,25 +124,28 @@ def _run_command(args: list[str], cwd: Optional[Path] = None,
                                        out or "", err or "")
 
 
-_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
-
 def _spin_stderr(stop: threading.Event, label: str) -> None:
     """A one-line working animation, on the operator's stderr only.
+
+    A pac-man bar: the mouth eats its way along a row of dots, one per
+    second, wrapping like a level — motion that never stalls even on a
+    fetch ten minutes long, because the elapsed counter beside it is the
+    thing that tells the truth about how long it has been.
 
     Redrawn in place with `\\r`, so the child's streamed lines stay whole
     above it; cleared on the way out so the row is not left hanging.
     """
-    i = 0
+    DOTS = 10
     started = time.time()
     try:
         while not stop.wait(0.1):
-            elapsed = int(time.time() - started)
+            elapsed = time.time() - started
+            eaten = int(elapsed) % DOTS
+            row = ("·" * eaten) + "ᗢ" + ("·" * (DOTS - eaten - 1))
             sys.stderr.write(
-                f"\r\033[K  {_SPIN_FRAMES[i % len(_SPIN_FRAMES)]} "
-                f"{label or 'working'} {elapsed}s")
+                f"\r\033[K  ᗢ {label or 'working'}  {row}  "
+                f"{int(elapsed)}s")
             sys.stderr.flush()
-            i += 1
     finally:
         sys.stderr.write("\r\033[K")
         sys.stderr.flush()
@@ -177,9 +175,10 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 def _git(runner: CommandRunner, repo: Path, *args: str,
          timeout: float = 300.0,
-         stream: bool = False) -> subprocess.CompletedProcess:
+         stream: bool = False,
+         label: Optional[str] = None) -> subprocess.CompletedProcess:
     return runner(["git", "-C", str(repo), *args], timeout=timeout,
-                  stream=stream)
+                  stream=stream, label=label)
 
 
 def _resolve_target(repo: Path, explicit: Optional[str]) -> Optional[Path]:
@@ -236,7 +235,9 @@ def _sync_lfs(runner: CommandRunner, target: Path, report: Report,
         report.verdict = ("the checkout's LFS objects are missing — "
                           "nothing was installed")
         return False, report
-    done = _git(runner, target, "lfs", "pull", timeout=timeout)
+    done = _git(runner, target, "lfs", "pull", "--quiet",
+                timeout=timeout, stream=True,
+                label="fetching the submodule's LFS objects")
     if done.returncode != 0:
         report.add("the LFS objects", BAD, _status_text(done)[-300:])
         report.exit_code = EXIT_PREREQUISITE
@@ -304,8 +305,10 @@ def install(repo: Path, explicit: Optional[str] = None,
     # out submodule costs a few stat calls. It does *not* move an existing
     # checkout to the latest — that is the fetch below, which runs always,
     # so an install is never quietly the stale pinned commit.
-    done = _git(runner, repo, "submodule", "update", "--init", "--recursive", "--progress",
-                SUBMODULE, timeout=timeout, stream=stream)
+    done = _git(runner, repo, "submodule", "update", "--init",
+                "--recursive", "--quiet", SUBMODULE,
+                timeout=timeout, stream=stream,
+                label="installing the codex-core submodule")
     if done.returncode != 0:
         report.add("the checkout", BAD, _status_text(done)[-300:])
         report.exit_code = EXIT_PREREQUISITE
@@ -407,13 +410,16 @@ def _latest(runner: CommandRunner, repo: Path, target: Path,
     here_sha = (here.stdout or "").strip()
     report.add("the code", OK, f"at {here_sha}")
 
-    done = _git(runner, repo, "submodule", "foreach",
-                "git fetch origin main", timeout=timeout, stream=stream)
+    done = _git(runner, repo, "submodule", "foreach", "--quiet",
+                "git fetch --quiet origin main",
+                timeout=timeout, stream=stream,
+                label="fetching the codexify-core submodule upstream")
     # `foreach` walks every submodule; this repo has one. If the walk
     # fails, fall back to fetching inside the submodule directly.
     if done.returncode != 0:
-        done = _git(runner, target, "fetch", "origin", "main",
-                    timeout=timeout)
+        done = _git(runner, target, "fetch", "--quiet", "origin", "main",
+                    timeout=timeout, stream=True,
+                    label="fetching the codexify-core submodule upstream")
     if done.returncode != 0:
         detail = _status_text(done)
         report.add("the fetch", BAD,
@@ -451,8 +457,9 @@ def _latest(runner: CommandRunner, repo: Path, target: Path,
         ok, report = _sync_lfs(runner, target, report, timeout)
         return ok, report
 
-    done = _git(runner, target, "checkout", there_sha, timeout=timeout,
-                stream=stream)
+    done = _git(runner, target, "checkout", "--quiet", there_sha,
+                timeout=timeout, stream=stream,
+                label="checking out the codexify-core submodule upstream")
     if done.returncode != 0:
         report.add("the move", BAD, _status_text(done)[-300:])
         report.exit_code = EXIT_PREREQUISITE
