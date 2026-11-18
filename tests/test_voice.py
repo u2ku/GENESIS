@@ -176,6 +176,7 @@ class TestTheVenv(VoiceFixture):
         self.assertTrue(ok, detail)
         self.assertEqual(ran[0][:3], ["uv", "venv", "--python"])
         self.assertIn("3.13", ran[0])
+        self.assertIn("--clear", ran[0])  # an existing venv must not block
 
     def test_no_compatible_python_names_the_manual_step(self):
         with unittest.mock.patch.object(

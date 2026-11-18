@@ -1397,8 +1397,11 @@ def _install_kokoro_venv() -> tuple:
         venv.mkdir(parents=True, exist_ok=True)
         ticker.start()
         if builder == "uv":
+            # --clear: a rebuilt venv is the wizard's normal case — a
+            # failed or hand-built one must not block the re-run.
             result = subprocess.run(
-                ["uv", "venv", "--python", "3.13", "--seed", str(venv)],
+                ["uv", "venv", "--python", "3.13", "--seed", "--clear",
+                 str(venv)],
                 capture_output=True, text=True, timeout=600)
         else:
             result = subprocess.run(
