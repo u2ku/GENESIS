@@ -394,6 +394,106 @@ class _FakeTTY:
         return "utf-8"
 
 
+class TestTheRemoteRuntime(NativeCase):
+    """The endpoint a machine was pointed at, and the wiring that follows."""
+
+    KEYS = ("CODEXIFY_RUNTIME_ENDPOINT", "OPENAI_API_BASE", "CODEXIFY_MODEL")
+
+    def setUp(self):
+        super().setUp()
+        self._saved = {k: os.environ.get(k) for k in self.KEYS}
+        for k in self.KEYS:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        super().tearDown()
+
+    def test_the_shell_wins_over_the_file(self):
+        """An exported endpoint is the more recent choice, and it beats the
+        one the installer wrote down."""
+        os.environ["CODEXIFY_RUNTIME_ENDPOINT"] = "http://100.100.100.100:8000/v1"
+        codexify.write_env(self.install,
+                           {"CODEXIFY_RUNTIME_ENDPOINT":
+                            "http://127.0.0.1:9000/v1"})
+        base, model = native.runtime_endpoint_override(self.install)
+        self.assertEqual(base, "http://100.100.100.100:8000/v1")
+        self.assertIsNone(model)
+
+    def test_the_file_answers_when_the_shell_is_silent(self):
+        """The installer's Whoosh'd step writes the endpoint into the
+        `.env`, and a wizard that probed only localhost would never find
+        it. The `.env` is the record of how this machine was configured."""
+        codexify.write_env(self.install,
+                           {"CODEXIFY_RUNTIME_ENDPOINT":
+                            "http://100.71.144.117:8000/v1",
+                            "CODEXIFY_MODEL": "supergemma4-26b-uncensored"})
+        base, model = native.runtime_endpoint_override(self.install)
+        self.assertEqual(base, "http://100.71.144.117:8000/v1")
+        self.assertEqual(model, "supergemma4-26b-uncensored")
+
+    def test_a_machine_with_no_answer_gets_no_wiring(self):
+        """No shell, no file: there is nothing to override with, and the
+        preset probing decides as it always has."""
+        base, model = native.runtime_endpoint_override(self.install)
+        self.assertIsNone(base)
+        self.assertIsNone(model)
+
+    def test_the_wiring_points_every_address_at_the_broker(self):
+        """`LOCAL_BASE_URL` is the address the backend's own clients dial,
+        so it is the one that carries the tailnet address — not the
+        localhost guess the preset made."""
+        wiring = native.remote_runtime_overrides(
+            "http://100.71.144.117:8000/v1", "supergemma4-26b-uncensored")
+        self.assertEqual(wiring["LOCAL_BASE_URL"],
+                         "http://100.71.144.117:8000/v1")
+        self.assertEqual(wiring["LOCAL_DOCKER_FALLBACK_BASE_URL"],
+                         "http://100.71.144.117:8000/v1")
+        self.assertEqual(wiring["VAULTNODE_BASE_URL"],
+                         "http://100.71.144.117:8000")
+        self.assertEqual(wiring["CODEXIFY_RUNTIME_ENDPOINT"],
+                         "http://100.71.144.117:8000/v1")
+        self.assertEqual(wiring["CODEXIFY_MODEL"],
+                         "supergemma4-26b-uncensored")
+
+    def test_setup_wires_the_endpoint_the_file_names(self):
+        """The wizard reads what the installer wrote: the plan points the
+        stack at the Mac Studio's broker, not at the localhost fallback,
+        and the answer is written down for the next run."""
+        def runner(args, cwd=None, timeout=120.0, env=None):
+            import subprocess
+            return subprocess.CompletedProcess(args, 0, "ok", "")
+
+        original = native.tcp_open
+        native.tcp_open = lambda host, port, timeout=1.5: True
+        codexify.write_env(self.install,
+                           {"CODEXIFY_RUNTIME_ENDPOINT":
+                            "http://100.71.144.117:8000/v1"})
+        try:
+            report = native.setup(self.install, runner=runner,
+                                  http_getter=self.getter, dry_run=True)
+        finally:
+            native.tcp_open = original
+        self.assertEqual(report.exit_code, native.EXIT_OK)
+        diff = next(row.detail for row in report.rows
+                    if row.label == "the diff")
+        self.assertIn("+LOCAL_BASE_URL=http://100.71.144.117:8000/v1", diff)
+        self.assertIn("+LLM_MODEL=supergemma4-26b-uncensored", diff)
+        # The endpoint is already in the file — the plan keeps it, as an
+        # unchanged line, which is the point: what was chosen persists.
+        self.assertIn("CODEXIFY_RUNTIME_ENDPOINT="
+                      "http://100.71.144.117:8000/v1", diff)
+        # Nothing was written — a plan, and nothing else. The file keeps
+        # the localhost address the template gave it, not the broker's.
+        written = codexify.read_env(self.install / codexify.ENV_FILE)
+        self.assertEqual(written["LOCAL_BASE_URL"],
+                         "http://localhost:8000/v1")
+
+
 class TestTheProcesses(NativeCase):
 
     def test_a_stopped_supervisor_is_not_running(self):

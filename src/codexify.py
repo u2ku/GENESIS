@@ -182,6 +182,15 @@ PRESETS: dict[str, Preset] = {
 PRESET_ORDER = ("whooshd-mlx", "ollama", "lmstudio",
                  "custom-openai-compatible")
 
+# The default remote runtime. A machine with no local runtime of its own —
+# an Arch box on the tailnet, say — talks to the Mac Studio's Whoosh'd
+# broker, the one the `space.codexify.whooshd` LaunchAgent serves on
+# 100.71.144.117:8000, and the model is the key its registry advertises
+# (whooshd/configs/models.luna.yaml). The installer's question and the
+# wizard's wiring both read it from here, so the two agree on one default.
+DEFAULT_REMOTE_RUNTIME_ENDPOINT = "http://100.71.144.117:8000/v1"
+DEFAULT_REMOTE_RUNTIME_MODEL = "supergemma4-26b-uncensored"
+
 # The secrets Codexify owns. They are generated, never printed, and never
 # accepted on a command line.
 SECRET_NAMES = frozenset({

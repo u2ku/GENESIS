@@ -266,6 +266,69 @@ def get_service_hints(missing: Iterable[str]) -> str:
 def brew_hint(missing: Iterable[str]) -> str:
     return get_service_hints(missing)
 
+
+def runtime_endpoint_override(install: Path) -> tuple[Optional[str], Optional[str]]:
+    """The remote runtime this machine was pointed at, and its model.
+
+    A machine whose runtime is remote — an Arch box pointing at the Mac
+    Studio's broker over the tailnet — has nothing answering on localhost
+    for the preset probe to find, so the answer lives in configuration:
+    the `.env` the installer's Whoosh'd step wrote, with the shell's
+    environment winning over it, because an exported
+    `CODEXIFY_RUNTIME_ENDPOINT` is the more recent choice.
+    """
+    existing = codexify.read_env(install / codexify.ENV_FILE)
+    base = (os.environ.get("CODEXIFY_RUNTIME_ENDPOINT")
+            or os.environ.get("OPENAI_API_BASE")
+            or existing.get("CODEXIFY_RUNTIME_ENDPOINT")
+            or existing.get("OPENAI_API_BASE"))
+    model = (os.environ.get("CODEXIFY_MODEL")
+             or existing.get("CODEXIFY_MODEL"))
+    return base or None, model or None
+
+
+def remote_runtime_overrides(base: str,
+                             model: Optional[str] = None) -> dict[str, str]:
+    """The `.env` wiring that points the stack at a remote runtime.
+
+    `LOCAL_BASE_URL` is the address the backend's own clients dial, so it
+    is the one that has to carry the tailnet address — the preset's
+    localhost guess is worth nothing here. `VAULTNODE_BASE_URL` is the
+    runtime's root, without the `/v1`. The endpoint is written back under
+    its own name too, so the next run reads what this one chose.
+    """
+    wiring = {
+        "LOCAL_BASE_URL": base,
+        "LOCAL_DOCKER_FALLBACK_BASE_URL": base,
+        "VAULTNODE_BASE_URL": (base[:-3] if base.endswith("/v1") else base),
+        "CODEXIFY_RUNTIME_ENDPOINT": base,
+        "OPENAI_API_BASE": base,
+    }
+    if model:
+        wiring["CODEXIFY_MODEL"] = model
+    return wiring
+
+
+def prompt_runtime_defaults() -> tuple[str, str]:
+    """Ask once for the remote runtime, defaulting to the Mac Studio's.
+
+    Hit enter twice and this machine points at the broker the
+    `space.codexify.whooshd` LaunchAgent serves. The answer is written
+    into the `.env`, so the question is asked once per machine — not once
+    per run.
+    """
+    endpoint = codexify.DEFAULT_REMOTE_RUNTIME_ENDPOINT
+    model = codexify.DEFAULT_REMOTE_RUNTIME_MODEL
+    print("\n[Whoosh'd Remote Inference Broker Setup]")
+    try:
+        endpoint = (input(f"  > Runtime endpoint URL [{endpoint}]: ").strip()
+                    or endpoint)
+        model = (input(f"  > Model identifier [{model}]: ").strip() or model)
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return endpoint, model
+
+
 CommandRunner = Callable[..., subprocess.CompletedProcess]
 HttpGetter = Callable[[str, float], tuple[int, str]]
 
@@ -626,14 +689,15 @@ def detect(install: Path, *, python: Optional[str] = None,
                     f"pnpm {pnpm}" if pnpm else
                     "pnpm is not here — the API works without it"))
 
-    import os
-    override_base = os.environ.get("CODEXIFY_RUNTIME_ENDPOINT") or os.environ.get("OPENAI_API_BASE")
+    override_base, override_model = runtime_endpoint_override(install)
     if override_base:
         # Respect the remote inference node override over Tailscale using a valid preset
-        preset_id, model, base = "ollama", os.environ.get("CODEXIFY_MODEL", "supergemma"), override_base
+        preset_id = "ollama"
+        model = (override_model or codexify.DEFAULT_REMOTE_RUNTIME_MODEL)
+        base = override_base
     else:
         preset_id, model, base = codexify.detect_runtime(
-        http_getter or codexify._http_get)
+            http_getter or codexify._http_get)
     if preset_id:
         rows.append(Row("the local runtime", OK,
                         f"{codexify.PRESETS[preset_id].display_name} at {base} "
@@ -1203,6 +1267,17 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
         return report
 
     # -- configure ---------------------------------------------------------
+    env_path = install / codexify.ENV_FILE
+    existing = codexify.read_env(env_path)
+
+    # A machine that was pointed at a remote runtime does not go probing
+    # for one on localhost — the endpoint it was given is the runtime, and
+    # the model it was given is what the workers get. A `--model` wins over
+    # the configured one, as the more deliberate choice; a `--preset` does
+    # not, because its localhost addresses are worth nothing against an
+    # endpoint that was written down.
+    override_base, override_model = runtime_endpoint_override(install)
+
     preset_id = codexify.resolve_preset(preset)
     if preset is not None and preset_id is None:
         report.add("the local runtime", BAD,
@@ -1211,10 +1286,27 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
         report.exit_code = EXIT_USAGE
         report.verdict = "nothing was written"
         return report
-    if preset_id is None:
+    elif override_base:
+        preset_id = "ollama"
+        model = (model or override_model
+                 or codexify.DEFAULT_REMOTE_RUNTIME_MODEL)
+    elif preset_id is None:
         preset_id, detected_model, _ = codexify.detect_runtime(
             http_getter or codexify._http_get)
         model = model or detected_model
+        if preset_id is None:
+            # Nothing answered and nothing was configured. A machine with
+            # no local runtime is not a broken machine — its runtime lives
+            # elsewhere. Ask once, defaulting to the Mac Studio's broker;
+            # hit enter and the answer is written into the `.env`, so the
+            # question is asked once per machine, not once per run. A piped
+            # run, a test, a dry run is not asked at all.
+            if (http_getter is None and not dry_run
+                    and sys.stdin.isatty()
+                    and not getattr(prompt_runtime_defaults,
+                                    "no_prompts", False)):
+                override_base, answered_model = prompt_runtime_defaults()
+                model = model or answered_model
     else:
         _, detected_model, _ = codexify.detect_runtime(
             http_getter or codexify._http_get, presets=[preset_id])
@@ -1222,13 +1314,16 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
     if preset_id is None:
         preset_id = "ollama"  # Fallback gracefully instead of blocking
 
-    env_path = install / codexify.ENV_FILE
-    existing = codexify.read_env(env_path)
     db_url = existing.get("DATABASE_URL") or default_db_url(existing)
     redis_url = default_redis_url(existing)
     overrides = native_env_overrides(existing, preset_id, model, cloud,
                                      db_url, redis_url, None,
                                      install=install, theme=theme)
+    if override_base:
+        # The wiring the preset cannot know: the runtime is elsewhere, on
+        # the tailnet, and every address the stack dials it by — its own
+        # clients, the fallback, the health probes — points there.
+        overrides.update(remote_runtime_overrides(override_base, model))
 
     refusal = codexify.verify_writable(install, env_path)
     if refusal:
