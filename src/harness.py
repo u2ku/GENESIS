@@ -78,8 +78,8 @@ def speak(text, voice=None):
     """
     voice = voice or VOICE_DEFAULT[0]
     env = None
-    home = os.environ.get("GENESIS_KOKORO_HOME") or (
-        Path.home() / ".local" / "share" / "genesis" / "kokoro")
+    home = Path(os.environ.get("GENESIS_KOKORO_HOME")
+                 or Path.home() / ".local" / "share" / "genesis" / "kokoro")
     py = home / "venv" / "bin" / "python"
     script = home / "kokoro_speak.py"
     if script.is_file() and py.is_file() \

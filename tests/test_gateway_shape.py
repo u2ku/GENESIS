@@ -428,7 +428,7 @@ class TestTheWrittenSettings(ShapeCase):
                     "--wizard", rung,
                     "--key-file", str(keyfile),
                     "--gateway-url", gateway_url,
-                    "--no-codexify", "--no-tailscale",
+                    "--no-codexify", "--no-tailscale", "--no-voice",
                 ])
             codes[rung] = (code, buffer.getvalue())
         self.assertEqual(codes["--dry-run"][0], 0, codes["--dry-run"][1])

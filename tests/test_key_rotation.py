@@ -146,6 +146,7 @@ class RotationCase(unittest.TestCase):
                 "--gateway-url", self.gateway.url,
                 "--no-codexify",
                 "--no-tailscale",
+                "--no-voice",
             ])
         return code, buffer.getvalue()
 

@@ -109,6 +109,45 @@ def claude_settings_path() -> Path:
 def auth_key_path() -> Path:
     return node_dir() / "auth.key"
 
+
+def kokoro_home() -> Path:
+    """Where the voice lives, outside the repo and outside Luna."""
+    env = os.environ.get("GENESIS_KOKORO_HOME")
+    return Path(env).expanduser() if env else share_dir() / "kokoro"
+
+
+def kokoro_script_path() -> Path:
+    return kokoro_home() / "kokoro_speak.py"
+
+
+def kokoro_model_path() -> Path:
+    return kokoro_home() / "kokoro-v1.0.onnx"
+
+
+def kokoro_voices_path() -> Path:
+    return kokoro_home() / "voices-v1.0.bin"
+
+
+def kokoro_python_path() -> Path:
+    return kokoro_home() / "venv" / "bin" / "python"
+
+
+# The one release that matches Luna's working venv, so the voice is the
+# same voice on every machine: kokoro-onnx 0.5.0 against model-files-v1.0.
+KOKORO_PIP_PIN = "kokoro-onnx==0.5.0"
+KOKORO_MODEL_URL = ("https://github.com/thewh1teagle/kokoro-onnx/"
+                    "releases/download/model-files-v1.0/kokoro-v1.0.onnx")
+KOKORO_VOICES_URL = ("https://github.com/thewh1teagle/kokoro-onnx/"
+                     "releases/download/model-files-v1.0/voices-v1.0.bin")
+
+
+def kokoro_ready() -> bool:
+    """The voice can speak: script, venv, model and voices all present."""
+    return (kokoro_script_path().is_file()
+            and kokoro_python_path().is_file()
+            and kokoro_model_path().is_file()
+            and kokoro_voices_path().is_file())
+
 PROBE_VERSION = receipt_mod.PROBE_VERSION
 
 # The exit codes are part of the contract (docs/PORTABILITY.md §5.5,
@@ -513,6 +552,76 @@ def _aggressive_actions(ctx, profile: dict) -> list:
     return actions
 
 
+def _voice_actions(ctx) -> list:
+    """The voice: kokoro, standing on its own feet on every machine.
+
+    The harness used to borrow Luna's wrapper, which meant the voice was
+    silently absent anywhere ~/Luna was not. The wizard now lays down the
+    same four pieces Luna needs — script, venv, model, voices — inside
+    GENESIS's own state directory. Each is a normal plan action: present
+    in the diff, converged on the second run, owned by the receipt.
+    """
+    actions = []
+
+    # -- the synth script, vendored from the repository itself.
+    vendored = ROOT / "tools" / "kokoro" / "kokoro_speak.py"
+    script_content = vendored.read_text(encoding="utf-8")
+    actions.append(_action(
+        "kokoro-script", "file", kokoro_script_path(),
+        {"present": True},
+        {"present": kokoro_script_path().exists(),
+         "converged": _file_effect(kokoro_script_path(), script_content) == "none"},
+        _file_effect(kokoro_script_path(), script_content),
+        content=script_content))
+
+    # -- the venv with the pinned kokoro-onnx. A directory, then the pip
+    #    install inside it; the directory action converges at once, the
+    #    command action reports the honest state of the install.
+    venv = kokoro_home() / "venv"
+    actions.append(_action(
+        "kokoro-venv-dir", "dir", venv,
+        {"present": True},
+        {"present": venv.is_dir()},
+        "none" if venv.is_dir() else "create"))
+    venv_ok = kokoro_python_path().is_file() and _venv_has_kokoro()
+    actions.append(_action(
+        "kokoro-venv", "command", "kokoro venv",
+        {"present": True, "package": KOKORO_PIP_PIN},
+        {"present": venv_ok},
+        "none" if venv_ok else "install",
+        note="" if venv_ok else
+             f"a python venv with {KOKORO_PIP_PIN} — built, not downloaded"))
+
+    # -- the model and the voices, downloaded once and hashed by the
+    #    receipt like any other file the wizard owns.
+    for label, path, url in (
+            ("kokoro-model", kokoro_model_path(), KOKORO_MODEL_URL),
+            ("kokoro-voices", kokoro_voices_path(), KOKORO_VOICES_URL)):
+        present = path.is_file() and path.stat().st_size > 0
+        actions.append(_action(
+            label, "command", path.name,
+            {"present": True, "from": url},
+            {"present": present},
+            "none" if present else "install",
+            note="" if present else f"downloaded once from {url}"))
+
+    return actions
+
+
+def _venv_has_kokoro() -> bool:
+    """Ask the venv's own pip whether the pinned package is importable."""
+    py = kokoro_python_path()
+    if not py.is_file():
+        return False
+    try:
+        result = subprocess.run(
+            [str(py), "-c", "import kokoro_onnx"],
+            capture_output=True, timeout=120)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def _wizard_actions(ctx) -> list:
     """The wizard's own actions: the credential, the helper, the consumers."""
     actions = []
@@ -553,6 +662,16 @@ def _wizard_actions(ctx) -> list:
             credential=False))
 
     actions.extend(_shim_actions(ctx))
+
+    if ctx.no_voice:
+        # Same honesty rule as Codexify: opting out is a choice, but a
+        # machine that cannot speak should not pass silently either way.
+        actions.append(_action(
+            "kokoro-voice", "probe", "voice",
+            {"configured": True}, {"configured": False}, "none",
+            note="skipped by --no-voice; he stays silent on this machine"))
+    else:
+        actions.extend(_voice_actions(ctx))
 
     if not ctx.no_codexify and ctx.codexify_dir:
         codexify_env = ctx.codexify_dir / ".env"
@@ -1208,6 +1327,53 @@ def apply_plan(ctx, actions: list, manifest: dict) -> tuple:
     return applied, failed, manual, conflicted
 
 
+def _install_kokoro_venv() -> tuple:
+    """Build the venv and pip-install the pinned kokoro-onnx into it."""
+    home = kokoro_home()
+    venv = home / "venv"
+    try:
+        venv.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            [sys.executable, "-m", "venv", str(venv)],
+            capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            return False, f"venv creation failed: {result.stderr.strip()[:200]}"
+        pip = venv / "bin" / "pip"
+        if not pip.is_file():
+            return False, "the venv has no pip — python3-venv may be missing"
+        result = subprocess.run(
+            [str(pip), "install", "--quiet", KOKORO_PIP_PIN],
+            capture_output=True, text=True, timeout=1800)
+        if result.returncode != 0:
+            return False, f"pip install failed: {result.stderr.strip()[:200]}"
+    except OSError as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    except subprocess.TimeoutExpired:
+        return False, "pip install timed out after 30 minutes"
+    if not _venv_has_kokoro():
+        return False, "the venv was built but kokoro_onnx does not import"
+    return True, "venv built and kokoro-onnx installed"
+
+
+def _download(url: str, dest: Path) -> tuple:
+    """Fetch a file to its final path, atomically — a partial file is
+    never left where the plan will read it as converged."""
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(url, timeout=600) as resp, \
+                open(tmp, "wb") as out:
+            shutil.copyfileobj(resp, out)
+        if tmp.stat().st_size == 0:
+            tmp.unlink(missing_ok=True)
+            return False, f"downloaded {dest.name} but it is empty"
+        tmp.replace(dest)
+    except (OSError, urllib.error.URLError) as exc:
+        tmp.unlink(missing_ok=True)
+        return False, f"{type(exc).__name__} fetching {dest.name}: {exc}"
+    return True, f"downloaded {dest.name}"
+
+
 def _run_command(ctx, action: dict) -> tuple:
     """Run the one command the plan has. It never carries a credential."""
     if action.get("id") == "claude-cli":
@@ -1238,6 +1404,12 @@ def _run_command(ctx, action: dict) -> tuple:
         if ctx.no_start:
             return True, "written, not started (--no-start)"
         return node.enable_daemon(Path(action.get("target", "")))
+    if action.get("id") == "kokoro-venv":
+        return _install_kokoro_venv()
+    if action.get("id") == "kokoro-model":
+        return _download(KOKORO_MODEL_URL, kokoro_model_path())
+    if action.get("id") == "kokoro-voices":
+        return _download(KOKORO_VOICES_URL, kokoro_voices_path())
     # An action this runner does not know is a FAILURE, not a success.
     # The plan is full of command actions now, and a silent (True, "")
     # here is the false success this project exists to kill.
@@ -2105,6 +2277,7 @@ class Context:
         self.no_tailscale = False
         self.no_claude = False
         self.no_codexify = False
+        self.no_voice = False
         self.force_own = []
         self.key_file = None
         self.tailnet_key_file = None
@@ -2159,6 +2332,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="skip the Claude Code target")
     parser.add_argument("--no-codexify", action="store_true",
                         help="skip the Codexify target")
+    parser.add_argument("--no-voice", action="store_true",
+                        help="skip the voice (kokoro) target")
     parser.add_argument("--codexify", default=None,
                         help="the Codexify installation to configure. "
                              "Default: detected")
@@ -2208,6 +2383,7 @@ def main(argv=None) -> int:
         ctx.no_tailscale = args.no_tailscale
         ctx.no_claude = args.no_claude
         ctx.no_codexify = args.no_codexify
+        ctx.no_voice = args.no_voice
         ctx.force_own = list(args.force_own)
         ctx.no_start = args.no_start
         ctx.key_file = args.key_file
