@@ -1334,8 +1334,12 @@ def _install_kokoro_venv() -> tuple:
     """Build the venv and pip-install the pinned kokoro-onnx into it."""
     home = kokoro_home()
     venv = home / "venv"
+    bar = _Progress(f"build {venv.name} + pip install {KOKORO_PIP_PIN}")
+    ticker = threading.Thread(
+        target=_tick_until, args=(bar,), daemon=True)
     try:
         venv.mkdir(parents=True, exist_ok=True)
+        ticker.start()
         result = subprocess.run(
             [sys.executable, "-m", "venv", str(venv)],
             capture_output=True, text=True, timeout=300)
@@ -1353,9 +1357,64 @@ def _install_kokoro_venv() -> tuple:
         return False, f"{type(exc).__name__}: {exc}"
     except subprocess.TimeoutExpired:
         return False, "pip install timed out after 30 minutes"
+    finally:
+        bar.done = True
+        ticker.join(timeout=1)
+        bar.stop("done" if _venv_has_kokoro() else "finished with errors")
     if not _venv_has_kokoro():
         return False, "the venv was built but kokoro_onnx does not import"
     return True, "venv built and kokoro-onnx installed"
+
+
+def _tick_until(bar: "_Progress") -> None:
+    """Spin the progress line until the thread is told to go quiet."""
+    while not getattr(bar, "done", False):
+        bar.tick()
+        time.sleep(0.25)
+
+
+class _Progress:
+    """One terminal line that tells the truth about a long operation.
+
+    A byte counter when the size is known, a spinner when it is not, and
+    silence when stdout is not a terminal — a piped or tested run gets
+    no escape codes, only the final result.
+    """
+
+    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, label: str, total: Optional[int] = None):
+        self.label = label
+        self.total = total
+        self.quiet = not sys.stdout.isatty()
+        self.count = 0
+        self.frame = 0
+        self.started = time.monotonic()
+
+    def tick(self, added: int = 0) -> None:
+        self.count += added
+        if self.quiet:
+            return
+        self.frame = (self.frame + 1) % len(self.FRAMES)
+        elapsed = time.monotonic() - self.started
+        spin = self.FRAMES[self.frame]
+        if self.total:
+            done = min(self.count, self.total) / self.total
+            sys.stdout.write(
+                f"\r  {spin} {self.label} — "
+                f"{self.count / 1e6:6.1f} / {self.total / 1e6:.1f} MB "
+                f"({done:.0%}, {elapsed:.0f}s)")
+        else:
+            sys.stdout.write(
+                f"\r  {spin} {self.label} — {elapsed:.0f}s")
+        sys.stdout.flush()
+
+    def stop(self, final: str) -> None:
+        if self.quiet:
+            return
+        sys.stdout.write(f"\r  {self.label} — {final}"
+                         + " " * 24 + "\n")
+        sys.stdout.flush()
 
 
 def _download(url: str, dest: Path) -> tuple:
@@ -1364,9 +1423,18 @@ def _download(url: str, dest: Path) -> tuple:
     tmp = dest.with_name(dest.name + ".part")
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(url, timeout=600) as resp, \
-                open(tmp, "wb") as out:
-            shutil.copyfileobj(resp, out)
+        with urllib.request.urlopen(url, timeout=600) as resp:
+            total = resp.headers.get("Content-Length")
+            bar = _Progress(f"download {dest.name}",
+                             int(total) if total else None)
+            with open(tmp, "wb") as out:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    bar.tick(len(chunk))
+            bar.stop(f"{bar.count / 1e6:.1f} MB")
         if tmp.stat().st_size == 0:
             tmp.unlink(missing_ok=True)
             return False, f"downloaded {dest.name} but it is empty"

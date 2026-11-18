@@ -87,11 +87,15 @@ class TestThePlan(VoiceFixture):
     def test_no_voice_opt_out_is_a_silent_probe_not_a_secret(self):
         ctx = self.context()
         ctx.no_voice = True
-        actions = bootstrap._wizard_actions(ctx)
+        actions = bootstrap.build_plan(ctx, {"supported": True})
         probes = [a for a in actions if a["id"] == "kokoro-voice"]
         self.assertEqual(len(probes), 1)
         self.assertEqual(probes[0]["effect"], "none")
         self.assertIn("--no-voice", probes[0].get("note", ""))
+        # and none of the real voice actions ride along
+        real = {"kokoro-script", "kokoro-venv", "kokoro-model",
+                "kokoro-voices"}
+        self.assertFalse(real & {a["id"] for a in actions})
 
 
 class TestTheDownloads(VoiceFixture):
@@ -116,6 +120,7 @@ class TestTheDownloads(VoiceFixture):
 
             def __init__(self, body):
                 self._body = body
+                self.headers = {}
 
             def read(self, n=-1):
                 if not self._body:
