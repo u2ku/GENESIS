@@ -33,6 +33,10 @@ from typing import Callable, Optional
 
 import codexify
 
+# The vendored sources are read from this repository, not from the
+# checkout — a checkout rewrite is exactly what they have to survive.
+_ROOT = Path(__file__).resolve().parent.parent
+
 # --------------------------------------------------------------- the contract --
 
 EXIT_OK = codexify.EXIT_OK
@@ -486,6 +490,37 @@ def _latest(runner: CommandRunner, repo: Path, target: Path,
 # and both are reported rather than guessed at.
 VENDORED_FIXES = (
     {
+        "file": "backend/tts_service/config.py",
+        "why": ("the TTS service ships only HuggingFace backends; the "
+                "British male voice needs a provider entry so the console "
+                "can list, preview and save profiles against it"),
+        "find": "TTS_PROVIDERS = {\n",
+        "replace": ("TTS_PROVIDERS = {\n"
+                    "    # -- Local kokoro (GENESIS-provisioned, British "
+                    "male voices) --\n"
+                    "    \"kokoro\": {\n"
+                    "        \"backend\": \"kokoro\",\n"
+                    "        \"voice\": \"bm_george\",\n"
+                    "    },\n"),
+    },
+    {
+        "file": "backend/tts_service/app.py",
+        "why": ("_resolve_backend knows one backend type; kokoro resolves "
+                "to the vendored backend class, lazily imported so the "
+                "service still boots without kokoro installed"),
+        "find": ("    else:\n"
+                 "        raise ValueError(f\"Unsupported backend type: "
+                 "{backend_type}\")\n"),
+        "replace": ("    elif backend_type == \"kokoro\":\n"
+                    "        from .backends.kokoro_tts import "
+                    "KokoroTTSBackend\n"
+                    "        return KokoroTTSBackend(\n"
+                    "            voice=config.get(\"voice\", \"bm_george\"))\n"
+                    "    else:\n"
+                    "        raise ValueError(f\"Unsupported backend type: "
+                    "{backend_type}\")\n"),
+    },
+    {
         "file": "guardian/core/pgdb.py",
         "why": ("table_exists reads row[0] from a dict_row connection, "
                 "which is a KeyError swallowed into 'migrations did not "
@@ -542,10 +577,26 @@ VENDORED_FIXES = (
 )
 
 
-def apply_vendored_fixes(target: Path) -> tuple[bool, str]:
-    """Apply the fixes the native path needs to the fresh checkout.
+# New files the native path needs — a fix can only patch what upstream
+# ships; a backend upstream has never heard of has to arrive whole.
+# The source lives in this repository and is copied into the checkout,
+# so it survives an install/update that rewrites the tree.
+VENDORED_FILES = (
+    {
+        "file": "backend/tts_service/backends/kokoro_tts.py",
+        "why": ("a kokoro backend for the TTS service: the British male "
+                "voice, run from the kokoro home the bootstrap builds on "
+                "each machine — upstream ships no kokoro support"),
+        "source": "tools/kokoro/codexify_kokoro_tts.py",
+    },
+)
 
-    Idempotent: every fix is checked before it is applied, so a second
+
+def apply_vendored_fixes(target: Path) -> tuple[bool, str]:
+    """Apply the fixes and files the native path needs to the fresh checkout.
+
+    Idempotent: every fix is checked before it is applied, and every file
+    is copied only when it differs from the vendored source, so a second
     run is a no-op. Returns (all_applied, note).
     """
     applied, already, notes = 0, 0, []
@@ -565,11 +616,34 @@ def apply_vendored_fixes(target: Path) -> tuple[bool, str]:
         path.write_text(text.replace(fix["find"], fix["replace"], 1),
                         encoding="utf-8")
         applied += 1
+    for entry in VENDORED_FILES:
+        source = _ROOT / entry["source"]
+        path = target / entry["file"]
+        if not source.is_file():
+            notes.append(f"{entry['source']}: the vendored source is "
+                         "missing from this checkout of GENESIS")
+            continue
+        content = source.read_text(encoding="utf-8")
+        if path.is_file() and path.read_text(encoding="utf-8") == content:
+            already += 1
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        applied += 1
+    total = len(VENDORED_FIXES) + len(VENDORED_FILES)
+    if notes:
+        # Something upstream moved or went missing: say so, and say so
+        # as a row a human reads (MANUAL), not as success with the
+        # missing pieces swallowed. What did apply, applied.
+        prefix = (f"{applied} applied, {already} already there; "
+                  if applied or already else "")
+        return False, prefix + "; ".join(notes)
     if applied:
-        return True, f"{applied} fix(es) applied, {already} already there"
-    if already == len(VENDORED_FIXES):
+        return True, (f"{applied} fix(es)/file(s) applied, "
+                      f"{already} already there")
+    if already == total:
         return True, "all already applied"
-    return False, "; ".join(notes) or "nothing was applied"
+    return False, "nothing was applied"
 
 
 def prompt_whooshd_manual_config() -> dict[str, str]:

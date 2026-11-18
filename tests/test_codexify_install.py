@@ -294,6 +294,34 @@ class VendoredFixCase(RepoCase):
     def write_fixture(self, fixed=False):
         """Upstream's files, or the fixed ones: pgdb.py and the hook."""
         self.sub.mkdir(exist_ok=True)
+        # The TTS service's two upstream shapes — the kokoro provider
+        # entry and the dispatch arm arrive only when fixed.
+        tts = self.sub / "backend" / "tts_service"
+        tts.mkdir(parents=True, exist_ok=True)
+        broken_config = 'TTS_PROVIDERS = {\n    "qwen3_0.6b": {},\n}\n'
+        fixed_config = broken_config.replace(
+            "TTS_PROVIDERS = {\n",
+            'TTS_PROVIDERS = {\n'
+            '    # -- Local kokoro (GENESIS-provisioned, British male '
+            'voices) --\n'
+            '    "kokoro": {\n'
+            '        "backend": "kokoro",\n'
+            '        "voice": "bm_george",\n'
+            '    },\n')
+        (tts / "config.py").write_text(
+            fixed_config if fixed else broken_config, encoding="utf-8")
+        dispatch = ('    else:\n'
+                    '        raise ValueError(f"Unsupported backend '
+                    'type: {backend_type}")\n')
+        fixed_dispatch = dispatch.replace(
+            "    else:\n",
+            '    elif backend_type == "kokoro":\n'
+            '        from .backends.kokoro_tts import KokoroTTSBackend\n'
+            '        return KokoroTTSBackend(\n'
+            '            voice=config.get("voice", "bm_george"))\n'
+            "    else:\n")
+        (tts / "app.py").write_text(
+            fixed_dispatch if fixed else dispatch, encoding="utf-8")
         fixed_pgdb = '''    def table_exists(self, table_name: str) -> bool:
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -390,15 +418,8 @@ class VendoredFixCase(RepoCase):
     def test_the_theme_default_fix_applies_to_the_hook(self):
         """The theme hook learns to honour VITE_THEME_DEFAULT as the
         fallback default, and localStorage still wins once set."""
-        self.sub.mkdir(exist_ok=True)
+        self.write_fixture(fixed=False)
         hook = self.sub / "frontend" / "src" / "hooks"
-        hook.mkdir(parents=True)
-        (hook / "useThemeController.ts").write_text(
-            "  const [mode, setMode] = useState<ThemeMode>(() => {\n"
-            '    if (typeof window === "undefined") return "system";\n'
-            '    const raw = window.localStorage.getItem("cfy.themeMode");\n'
-            "    return coerceMode(raw);\n"
-            "  });\n", encoding="utf-8")
         ok, note = ci.apply_vendored_fixes(self.sub)
         self.assertTrue(ok, note)
         text = (hook / "useThemeController.ts").read_text()
@@ -416,6 +437,62 @@ class VendoredFixCase(RepoCase):
         ok, note = ci.apply_vendored_fixes(self.sub)
         self.assertFalse(ok)
         self.assertIn("not there", note)
+
+
+class KokoroVendoredCase(VendoredFixCase):
+    """The kokoro backend, arriving whole.
+
+    A fix can patch what upstream ships; a backend upstream has never
+    heard of has to be copied in as a file, and the file's source of
+    truth is this repository — a checkout rewrite is exactly what it
+    has to survive. The provider entry and the dispatch arm are fixes;
+    the backend itself is a vendored file.
+    """
+
+    def test_the_kokoro_provider_is_registered(self):
+        self.write_fixture(fixed=False)
+        ok, note = ci.apply_vendored_fixes(self.sub)
+        self.assertTrue(ok, note)
+        text = (self.sub / "backend/tts_service/config.py").read_text()
+        self.assertIn('"kokoro"', text)
+        self.assertIn('"bm_george"', text)
+
+    def test_the_dispatcher_gains_the_kokoro_arm(self):
+        self.write_fixture(fixed=False)
+        ok, note = ci.apply_vendored_fixes(self.sub)
+        self.assertTrue(ok, note)
+        text = (self.sub / "backend/tts_service/app.py").read_text()
+        self.assertIn("KokoroTTSBackend", text)
+        self.assertIn('Unsupported backend type', text)  # the arm, not a rewrite
+
+    def test_the_backend_file_lands_byte_identical(self):
+        self.write_fixture(fixed=False)
+        ok, note = ci.apply_vendored_fixes(self.sub)
+        self.assertTrue(ok, note)
+        landed = (self.sub / "backend/tts_service/backends/kokoro_tts.py")
+        self.assertTrue(landed.is_file())
+        source = (ci._ROOT / "tools/kokoro/codexify_kokoro_tts.py")
+        self.assertEqual(landed.read_bytes(), source.read_bytes())
+
+    def test_a_drifted_backend_file_is_restored(self):
+        """The checkout is not the truth; the vendored source is."""
+        self.write_fixture(fixed=True)
+        landed = (self.sub / "backend/tts_service/backends/kokoro_tts.py")
+        landed.parent.mkdir(parents=True, exist_ok=True)
+        landed.write_text("tampered\n", encoding="utf-8")
+        ok, note = ci.apply_vendored_fixes(self.sub)
+        self.assertTrue(ok, note)
+        source = (ci._ROOT / "tools/kokoro/codexify_kokoro_tts.py")
+        self.assertEqual(landed.read_bytes(), source.read_bytes())
+
+    def test_a_missing_vendored_source_is_reported_not_crashed(self):
+        self.write_fixture(fixed=True)
+        bogus = tuple(dict(entry, source="tools/kokoro/not_there.py")
+                      for entry in ci.VENDORED_FILES)
+        with unittest.mock.patch.object(ci, "VENDORED_FILES", bogus):
+            ok, note = ci.apply_vendored_fixes(self.sub)
+        self.assertFalse(ok)  # the fixes landed; the file could not
+        self.assertIn("missing", note)
 
 
 class UpdateCase(RepoCase):
