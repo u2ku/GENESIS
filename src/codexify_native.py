@@ -108,6 +108,22 @@ SUPERVISOR = TOOLS / "codexify_supervisor.py"
 # Codexify's floor. The container pins 3.11, and the pinned wheels are built
 # against it, so 3.11 is what the native path asks for by preference.
 PYTHON_MIN = (3, 10)
+# Prefer Python 3.12 or 3.11 over bleeding-edge 3.14 to avoid source build breakages
+def find_preferred_python() -> str:
+    for py in ["python3.12", "python3.11", "python3.10", "python3"]:
+        import shutil, subprocess
+        if shutil.which(py):
+            # Verify version isn't 3.14+
+            try:
+                res = subprocess.run([py, "--version"], capture_output=True, text=True, check=True)
+                if "3.14" not in res.stdout:
+                    return py
+            except Exception:
+                pass
+    return "python3"
+
+PYTHON_PREFERRED = find_preferred_python()
+
 PYTHON_PREFERRED = (3, 11)
 
 # The one worker that answers a message. The others serve other queues and
