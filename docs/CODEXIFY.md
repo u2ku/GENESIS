@@ -359,6 +359,33 @@ genesis codexify down
 The same backend, the same database schema and the same chat worker — as
 processes on the host instead of containers.
 
+### Status
+
+**Working on macOS and on Arch Linux.** One command takes a machine from
+nothing to a running stack and an app you can open:
+
+```
+./genesis codexify install
+```
+
+| | macOS | Arch Linux |
+|---|---|---|
+| missing packages | offered via `brew` | offered via `pacman` |
+| the stack runs as | a detached process | a systemd user unit |
+| the launcher | `Codexify.app` on the Desktop | a tile in the app grid |
+
+- **Tailscale.** The default runtime is Whoosh'd on the Mac Studio, reached
+  over the tailnet, so a machine without a local runtime needs Tailscale:
+  **https://tailscale.com/download**. On Arch:
+  `sudo pacman -S tailscale && sudo systemctl enable --now tailscaled && sudo tailscale up`.
+- **Arch: run `sudo loginctl enable-linger $USER` once**, or the stack stops
+  when you log out. The wizard says so when it is off.
+- **The app window.** On Linux the tile and the wizard open Codexify in a
+  Chrome, Chromium or Brave app window. With none of those installed they
+  open a tab in the default browser.
+- **git-lfs is needed** — the checkout keeps its JSON there. The wizard
+  offers to install it.
+
 ### What it needs
 
 | | compose | native |
@@ -420,12 +447,14 @@ and stops everything when it is signalled. It is a **user** process: no
 
 ### What the wizard will not do
 
-It will not install system packages. When Postgres or Redis is missing it
-says exactly what to run and stops:
+It will not install anything unasked. When Postgres, Redis, pnpm or git-lfs
+is missing it prints the exact commands and, **on a terminal, asks** whether
+to run them. Without a terminal it prints them and stops:
 
 ```
-brew install postgresql@15 redis
+brew install postgresql@15 redis           # macOS
+sudo pacman -S --needed postgresql redis   # Arch, plus initdb and systemctl enable
 ```
 
-Installing packages on someone's machine is the operator's call. The wizard
-reports the gap and names the fix; it does not take it.
+Installing packages on someone's machine is the operator's call, so the
+answer is theirs.
