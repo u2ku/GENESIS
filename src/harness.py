@@ -491,6 +491,18 @@ LANDING_NOTE = ("The machine you choose becomes the machine you are. Whatever "
                 "you pick here, you shape it, and it answers to you.")
 
 
+def t_hint(args):
+    """The landing note, as a tool — so the passage is run, not recited.
+
+    It never enters the system prompt: a model that holds the words says
+    them forever (the tune proved it — the quote answered everything,
+    tools and greetings alike). Behind a tool, the words reach the
+    conversation only when he decides the moment is Luna's — and the
+    description says what the note is for without carrying the text.
+    """
+    return LANDING_NOTE
+
+
 def landing_setup(node_dir: Path, join: bool = True) -> dict:
     """The setup: the rows, and the exit code.
 
@@ -612,6 +624,13 @@ TOOLS = [
 
     ("guardrail", "Enforce the guard rail across the system.",
      t_guardrail, {"type": "object", "properties": {}}),
+
+    ("hint", "The landing note — what you tell Luna, once, when she is "
+             "about to choose a host: what choosing a machine means for "
+             "her. Call this when the moment is hers and the note has not "
+             "been said. The note's words are returned by the call; they "
+             "are not yours to recite from memory.",
+     t_hint, {"type": "object", "properties": {}}),
 
     ("landing", "Prepare this machine as a node: check it is ready, install "
                 "Tailscale, join the tailnet, write and start the heartbeat "
