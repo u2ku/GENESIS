@@ -98,6 +98,50 @@ class TestThePlan(VoiceFixture):
         self.assertFalse(real & {a["id"] for a in actions})
 
 
+class TestTheVenv(VoiceFixture):
+    """The venv build, driven with fakes — a NameError here shipped once
+    because no test ever reached this code."""
+
+    def test_the_build_runs_to_success(self):
+        home = bootstrap.kokoro_home()
+        home.mkdir(parents=True)
+        ran = []
+
+        def fake_run(cmd, **kwargs):
+            ran.append(cmd)
+            if "venv" in cmd:
+                (home / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+                (home / "venv" / "bin" / "pip").write_text("#!/bin/sh\n")
+            return unittest.mock.Mock(returncode=0, stderr="", stdout="")
+
+        with unittest.mock.patch.object(bootstrap.subprocess, "run",
+                                        side_effect=fake_run), \
+             unittest.mock.patch.object(bootstrap, "_venv_has_kokoro",
+                                        return_value=True):
+            ok, detail = bootstrap._install_kokoro_venv()
+        self.assertTrue(ok, detail)
+        self.assertEqual(len(ran), 2)  # the venv, then the pip install
+        self.assertIn("kokoro-onnx==0.5.0", ran[1])
+
+    def test_a_failed_pip_is_reported_not_crashed(self):
+        home = bootstrap.kokoro_home()
+        home.mkdir(parents=True)
+
+        def fake_run(cmd, **kwargs):
+            if "venv" in cmd:
+                (home / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+                (home / "venv" / "bin" / "pip").write_text("#!/bin/sh\n")
+                return unittest.mock.Mock(returncode=0, stderr="", stdout="")
+            return unittest.mock.Mock(returncode=1, stderr="boom",
+                                      stdout="")
+
+        with unittest.mock.patch.object(bootstrap.subprocess, "run",
+                                        side_effect=fake_run):
+            ok, detail = bootstrap._install_kokoro_venv()
+        self.assertFalse(ok)
+        self.assertIn("pip install failed", detail)
+
+
 class TestTheDownloads(VoiceFixture):
 
     def test_a_failed_download_leaves_no_partial_file(self):
