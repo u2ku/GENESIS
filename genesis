@@ -921,6 +921,24 @@ def _open_codexify(with_ui: bool, install=None):
               f"opened: {exc}")
 
 
+def _offer_git_lfs(codexify_native):
+    """Offer git-lfs before the code is fetched, the way pnpm is offered.
+
+    The vendored install keeps its JSON behind git-lfs, so a machine
+    without it checks out pointer files and nothing built from them can
+    work. A fresh machine met that as a stop — a named command, and a
+    retry once it had been run by hand — where pnpm, a step later, got an
+    offer. A terminal is asked and the package installed; a piped run is
+    printed the command, and the install still names it as the
+    prerequisite it is.
+    """
+    if shutil.which("git-lfs"):
+        return
+    offer = getattr(codexify_native, "prompt_and_fix_services", None)
+    if offer:
+        offer(["git-lfs"])
+
+
 def _codexify_wizard(args, ctx, codexify, explicit):
     """The continuous wizard: nothing → code → stack → launcher → done.
 
@@ -947,6 +965,7 @@ def _codexify_wizard(args, ctx, codexify, explicit):
         # -- phase 1: the code ------------------------------------------------
         if install is None:
             print("\n  phase 1 — the code\n")
+            _offer_git_lfs(codexify_native)
             report = codexify_install.install(ROOT, explicit=explicit,
                                              stream=True)
             _emit_codexify_report(ctx, report)

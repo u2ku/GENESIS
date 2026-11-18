@@ -192,6 +192,47 @@ class TestTheFlow(WizardCase):
         self.assertIn("the installation", self.out.getvalue())
         self.assertIn("the stack", self.out.getvalue())
 
+    def empty_machine(self, git_lfs_present):
+        """A wizard run from nothing, recording the order of what it does."""
+        order = []
+        state = {"found": False}
+
+        def fake_find(root, explicit=None):
+            return self.installed_d if state["found"] else None
+
+        def fake_install(root, explicit=None, stream=False):
+            order.append("install")
+            state["found"] = True
+            return Report(exit_code=EXIT_OK,
+                          rows=[Row("the installation", OK, "faked")])
+
+        def fake_setup(install, **kwargs):
+            self.setup_done[0] = True
+            return Report(exit_code=EXIT_OK, rows=[])
+
+        self.shutil_mock.which.side_effect = (
+            lambda name: "/usr/bin/" + name
+            if name != "git-lfs" or git_lfs_present else None)
+        offer = mock.Mock(side_effect=lambda missing: order.append(
+            ("offered", tuple(missing))))
+        sys.modules["codexify"].find_install = fake_find
+        sys.modules["codexify_install"].install = fake_install
+        sys.modules["codexify_native"].setup = fake_setup
+        sys.modules["codexify_native"].prompt_and_fix_services = offer
+        self.assertEqual(self.wizard(), EXIT_OK)
+        return order
+
+    def test_a_fresh_machine_is_offered_git_lfs_before_the_code_is_fetched(self):
+        """The Arch box met git-lfs as a stop — a named command and a hand-run
+        retry — where pnpm, a step later, got an offer. The checkout is the
+        step that needs it, so the offer comes first."""
+        order = self.empty_machine(git_lfs_present=False)
+        self.assertEqual(order, [("offered", ("git-lfs",)), "install"])
+
+    def test_a_machine_with_git_lfs_is_not_asked(self):
+        order = self.empty_machine(git_lfs_present=True)
+        self.assertEqual(order, ["install"])
+
     def test_a_done_machine_finishes_without_looping(self):
         self.find_install[0] = self.installed_d
         self.setup_done[0] = True
