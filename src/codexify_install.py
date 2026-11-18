@@ -26,6 +26,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -72,12 +74,30 @@ def _run_command(args: list[str], cwd: Optional[Path] = None,
     otherwise, and the wizard's contract is that the operator sees
     everything the machine is doing.
 
+    Even streamed, a command can go quiet for a long spell — a fetch
+    over a slow link, a clone of a filtered tree — and a terminal that
+    says nothing reads as a stall. So a streamed command that is allowed
+    more than a few minutes gets the spinner, on stderr, redrawn on the
+    same line: the child's own lines land whole above it, and when the
+    command ends the line is cleared. A pipe gets no spinner, because a
+    spinner in a log is noise, not progress.
+
     The child leads a process group of its own, and a timeout or a Ctrl+C
     takes the whole group down. `git submodule update` runs `git clone`,
     which runs `git-remote-https`; killing only the first leaves the rest
     downloading with nothing waiting for them, so the wizard would report
     a failure while the clone finished behind its back.
     """
+    spin = (stream and timeout > 300 and sys.stderr.isatty())
+    stop = threading.Event()
+    thread = None
+    if spin:
+        label = Path(args[0]).name if args else ""
+        if len(args) > 1 and "submodule" in args:
+            label = "git submodule"
+        thread = threading.Thread(
+            target=_spin_stderr, args=(stop, label), daemon=True)
+        thread.start()
     try:
         proc = subprocess.Popen(
             args, cwd=str(cwd) if cwd else None, text=True,
@@ -85,6 +105,9 @@ def _run_command(args: list[str], cwd: Optional[Path] = None,
             stderr=None if stream else subprocess.PIPE,
             start_new_session=True)
     except FileNotFoundError:
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=1.0)
         return subprocess.CompletedProcess(args, 127, "", "not found")
     try:
         out, err = proc.communicate(timeout=timeout)
@@ -98,8 +121,36 @@ def _run_command(args: list[str], cwd: Optional[Path] = None,
         # clone carries on.
         _kill_group(proc)
         raise
+    finally:
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=1.0)
     return subprocess.CompletedProcess(args, proc.returncode,
                                        out or "", err or "")
+
+
+_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _spin_stderr(stop: threading.Event, label: str) -> None:
+    """A one-line working animation, on the operator's stderr only.
+
+    Redrawn in place with `\\r`, so the child's streamed lines stay whole
+    above it; cleared on the way out so the row is not left hanging.
+    """
+    i = 0
+    started = time.time()
+    try:
+        while not stop.wait(0.1):
+            elapsed = int(time.time() - started)
+            sys.stderr.write(
+                f"\r\033[K  {_SPIN_FRAMES[i % len(_SPIN_FRAMES)]} "
+                f"{label or 'working'} {elapsed}s")
+            sys.stderr.flush()
+            i += 1
+    finally:
+        sys.stderr.write("\r\033[K")
+        sys.stderr.flush()
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
