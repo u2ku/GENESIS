@@ -972,14 +972,20 @@ def _codexify_wizard(args, ctx, codexify, explicit):
                 print("\n  phase 3 — the launcher\n")
                 made, detail = codexify_native.make_launcher(
                     install, launcher)
+                # On a Mac the launcher is a bundle whose place was named;
+                # on a Linux desktop it is the app-grid entry, and the grid
+                # is the only place it goes.
+                import platform as _platform
+                place = ("Desktop" if launcher == "desktop"
+                         else "Applications folder")
+                if _platform.system() != "Darwin":
+                    place = "app grid"
                 _emit_codexify_report(ctx, codexify.Report(
                     heading="CODEXIFY (launcher)",
                     rows=[codexify.Row("the launcher",
                                        codexify.OK if made
                                        else codexify.MANUAL, detail)],
-                    verdict=("the launcher is on the "
-                             + ("Desktop" if launcher == "desktop"
-                                else "Applications folder")
+                    verdict=("the launcher is on the " + place
                              if made else "the launcher was not made"),
                     exit_code=codexify.EXIT_OK))
 
@@ -1513,8 +1519,9 @@ def _p_codexify():
                         "user's own choice still wins once they make one")
     p.add_argument("--launcher", default=None,
                    choices=["desktop", "applications"],
-                   help="make a double-clickable launcher for the stack "
-                        "once it is up: 'desktop' or 'applications'")
+                   help="make a launcher for the stack once it is up: the "
+                        "app-grid entry on a Linux desktop, a bundle "
+                        "('desktop' or 'applications') on a Mac")
     p.add_argument("--no-launcher", action="store_true",
                    help="with 'install': do not make a launcher, even "
                         "though the wizard's default is to make one")

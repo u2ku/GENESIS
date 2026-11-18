@@ -437,6 +437,109 @@ class LauncherCase(unittest.TestCase):
         self.assertIn("no genesis", detail)
 
 
+class DesktopEntryCase(unittest.TestCase):
+    """The Linux launcher: a freedesktop entry in the app grid."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.install_dir = self.base / "install"
+        self.install_dir.mkdir()
+        self.fake_home = self.base / "home"
+        (self.fake_home / ".local" / "share" / "applications").mkdir(
+            parents=True)
+        self.genesis = self.base / "bin" / "genesis"
+        self.genesis.parent.mkdir()
+        self.genesis.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.genesis.chmod(0o755)
+        self._real_path = native.Path
+
+        class FakePath(type(Path())):
+            @staticmethod
+            def home():
+                return self.fake_home
+
+        native.Path = FakePath
+        self._real_platform = native.sys.platform
+        native.sys.platform = "linux"
+        # The icon probe must not find the real machine's frontend.
+        self._real_which = native.shutil.which
+        native.shutil.which = lambda name: None
+
+    def tearDown(self):
+        native.Path = self._real_path
+        native.sys.platform = self._real_platform
+        native.shutil.which = self._real_which
+        self._tmp.cleanup()
+
+    def entry(self):
+        return (self.fake_home / ".local" / "share" / "applications"
+                / native.DESKTOP_ENTRY_FILE)
+
+    def test_the_entry_lands_in_the_app_grid(self):
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        entry = self.entry().read_text()
+        self.assertIn("[Desktop Entry]", entry)
+        self.assertIn("Name=Codexify", entry)
+        self.assertIn("Terminal=false", entry)
+
+    def test_the_entry_runs_a_script_that_converges_and_opens(self):
+        """The grid tile is the Mac bundle's behaviour in Linux clothes:
+        converge the stack with the interface, then open the interface —
+        xdg-open, not `open` — with the API as the fallback."""
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        script = (self.install_dir / ".native" / "launcher.sh").read_text()
+        self.assertIn("codexify setup --with-ui", script)
+        self.assertIn("xdg-open http://127.0.0.1:5173", script)
+        self.assertIn("xdg-open http://127.0.0.1:8888", script)
+        self.assertIn("GENESIS_NO_BROWSER", script)
+        entry = self.entry().read_text()
+        self.assertIn("Exec=" + str(self.install_dir / ".native"
+                                    / "launcher.sh"), entry)
+
+    def test_a_second_run_converges_the_entry(self):
+        """The Mac bundle refuses a remake; the grid entry converges one.
+        A wizard that re-runs must refresh the tile to the stack that
+        exists now, not refuse and leave a stale entry pointing at an
+        install that moved."""
+        made, _ = native.make_launcher(self.install_dir, "desktop",
+                                       genesis_bin=str(self.genesis))
+        self.assertTrue(made)
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+
+    def test_the_entry_uses_the_frontend_icon_when_it_ships(self):
+        icons = (self.install_dir / "frontend" / "src" / "public"
+                 / "icons")
+        icons.mkdir(parents=True)
+        (icons / "icon-512.png").write_bytes(b"png")
+        made, _ = native.make_launcher(self.install_dir, "desktop",
+                                       genesis_bin=str(self.genesis))
+        self.assertTrue(made)
+        self.assertIn("Icon=" + str(icons / "icon-512.png"),
+                      self.entry().read_text())
+
+    def test_the_entry_is_made_without_an_icon(self):
+        """No icon shipped is not a failed launcher — the tile is a cog,
+        and a working cog beats a missing app."""
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        self.assertNotIn("Icon=", self.entry().read_text())
+
+    def test_the_entry_refuses_without_a_genesis(self):
+        made, detail = native.make_launcher(
+            self.install_dir, "desktop",
+            genesis_bin=str(self.base / "bin" / "not-there"))
+        self.assertFalse(made)
+        self.assertIn("no genesis", detail)
+
+
 class _FakeTTY:
     """A stdin that says what it is told: a terminal, and lines of it."""
 

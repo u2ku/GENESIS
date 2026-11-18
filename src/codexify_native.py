@@ -1703,6 +1703,11 @@ def down(install: Optional[Path], explicit: Optional[str] = None) -> Report:
 
 LAUNCHER_APPS = ("Applications", "Desktop")
 LAUNCHER_ID = "com.genesis.codexify"
+# One body, two openers: the Mac bundle says `open`, a freedesktop
+# entry says `xdg-open`. Everything else — the converge-if-not-answering,
+# the GENESIS_NO_BROWSER contract, the wait for vite to bind, the API as
+# the fallback — is the platform-independent behaviour of "open the
+# app", and lives here once.
 LAUNCHER_SCRIPT = """#!/bin/bash
 # Made by `genesis codexify setup --with-launcher`. The stack is started
 # only if it is not answering; a stack that is up is left alone.
@@ -1727,33 +1732,38 @@ fi
 # what is guaranteed to answer.
 for _ in {1..20}; do
   if curl -s -o /dev/null --max-time 2 http://127.0.0.1:5173/; then
-    open http://127.0.0.1:5173
+    $OPENER http://127.0.0.1:5173
     exit 0
   fi
   sleep 1
 done
-open http://127.0.0.1:8888
+$OPENER http://127.0.0.1:8888
 """
 
 
 def make_launcher(install: Path, where: str,
                   genesis_bin: Optional[str] = None,
                   log_dir: Optional[Path] = None) -> tuple[bool, str]:
-    """A double-clickable launcher for the stack, on the Desktop or in
-    /Applications.
+    """A double-clickable launcher for the stack.
 
-    The launcher is honest about what it is: a small bundle that runs the
-    same `genesis codexify setup` a terminal would, converges an already-
-    running stack instead of restarting it, and opens the interface in a
-    browser. It is not a real Mac app — the stack is processes and a
-    browser tab — and dressing it up further would be a claim the stack
-    cannot keep.
+    On a Mac that is a bundle on the Desktop or in /Applications. On a
+    Linux desktop it is a freedesktop entry — the app-grid tile that
+    GNOME and KDE and everything freedesktop show a person when they
+    look for their apps. The launcher is honest about what it is in
+    either shape: a small thing that runs the same `genesis codexify
+    setup` a terminal would, converges an already-running stack instead
+    of restarting it, and opens the interface in a browser. It is not a
+    real app — the stack is processes and a browser tab — and dressing
+    it up further would be a claim the stack cannot keep.
 
-    Returns (made, detail). The bundle is written atomically: a temp
-    directory renamed into place, so a half-written bundle never appears
-    on anyone's Desktop.
+    Returns (made, detail). Everything is written atomically: a temp
+    file renamed into place, so a half-written launcher never appears
+    in anyone's grid or on anyone's Desktop.
     """
     genesis_bin = genesis_bin or str(Path.home() / ".local" / "bin" / "genesis")
+
+    if sys.platform != "darwin":
+        return _make_desktop_entry(install, where, genesis_bin, log_dir)
 
     where = where.capitalize()
     if where not in LAUNCHER_APPS:
@@ -1798,7 +1808,8 @@ def make_launcher(install: Path, where: str,
         script = (root / "Contents" / "MacOS" / "Codexify")
         script.write_text(
             LAUNCHER_SCRIPT.replace("$GENESIS", genesis_bin)
-                          .replace("$LOG", str(logs / "launcher.log")),
+                          .replace("$LOG", str(logs / "launcher.log"))
+                          .replace("$OPENER", "open"),
             encoding="utf-8")
         script.chmod(0o755)
         try:
@@ -1806,3 +1817,111 @@ def make_launcher(install: Path, where: str,
         except OSError as exc:
             return False, f"the launcher could not be put in place: {exc}"
     return True, f"{bundle} — double-click starts (or converges) the stack and opens the interface"
+
+
+DESKTOP_ENTRY_FILE = "codexify.desktop"
+
+
+def _desktop_entry_text(install: Path, script: Path, icon: Optional[Path],
+                        terminal: bool) -> str:
+    """The freedesktop entry that puts Codexify in the app grid.
+
+    `Terminal=false` is the honest setting for the entry a person clicks:
+    the launcher converges the stack quietly and opens a browser, and a
+    terminal window flashing open for that is theatre. The wizard's own
+    runs keep their terminal — this entry is the grid tile, not the
+    operator's shell.
+    """
+    lines = [
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=Codexify",
+        "Comment=Start (or converge) the stack and open the interface",
+        "Exec=" + str(script),
+        "Categories=Utility;Development;",
+    ]
+    if icon is not None:
+        lines.append("Icon=" + str(icon))
+    if terminal:
+        lines.append("Terminal=true")
+    else:
+        lines.append("Terminal=false")
+    lines.append("StartupWMClass=Codexify")
+    lines.append("X-GNOME-UsesNotifications=false")
+    return "\n".join(lines) + "\n"
+
+
+def _make_desktop_entry(install: Path, where: str, genesis_bin: str,
+                        log_dir: Optional[Path]) -> tuple[bool, str]:
+    """The Linux launcher: a freedesktop entry, and the script behind it.
+
+    `where` is accepted for symmetry with the Mac bundle and ignored —
+    there is no Desktop/Applications choice to make on a freedesktop
+    desktop; the grid is the grid. The entry goes where the spec says
+    user entries go (`~/.local/share/applications`), the script lives
+    with the install's own runtime files, and the icon is the one the
+    frontend already ships — an install that has no frontend icon yet
+    gets an entry without one rather than no entry at all.
+
+    Both files are written atomically, and an entry that already exists
+    is converged, not refused: the wizard re-runs, the entry points at
+    the stack that exists now, and the grid tile never goes stale.
+    """
+    if not Path(genesis_bin).is_file():
+        return False, f"there is no genesis at {genesis_bin} to launch with"
+    apps_dir = Path.home() / ".local" / "share" / "applications"
+    entry_path = apps_dir / DESKTOP_ENTRY_FILE
+    logs = Path(log_dir) if log_dir else install / LOG_DIR
+    script = install / NATIVE_DIR / "launcher.sh"
+
+    for target, maker in ((logs, lambda p: p.mkdir(parents=True,
+                                                   exist_ok=True)),
+                          (install / NATIVE_DIR,
+                           lambda p: p.mkdir(parents=True, exist_ok=True))):
+        try:
+            maker(target)
+        except OSError as exc:
+            return False, f"the launcher's directory could not be made: {exc}"
+
+    icon = install / "frontend" / "src" / "public" / "icons" / "icon-512.png"
+    icon = icon if icon.is_file() else None
+
+    import tempfile
+    # The script first: the entry is dead weight until the script exists,
+    # and a person clicking the tile between the two writes must get a
+    # working app, not a missing-file error.
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=script.parent,
+                                         delete=False,
+                                         encoding="utf-8") as tmp:
+            tmp.write(LAUNCHER_SCRIPT
+                      .replace("$GENESIS", genesis_bin)
+                      .replace("$LOG", str(logs / "launcher.log"))
+                      .replace("$OPENER", "xdg-open"))
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(script)
+        script.chmod(0o755)
+    except OSError as exc:
+        return False, f"the launcher script could not be written: {exc}"
+
+    entry = _desktop_entry_text(install, script, icon, terminal=False)
+    try:
+        apps_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=apps_dir,
+                                         delete=False,
+                                         encoding="utf-8") as tmp:
+            tmp.write(entry)
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(entry_path)
+    except OSError as exc:
+        return False, f"the desktop entry could not be written: {exc}"
+
+    # The grid does not always watch the directory; the spec's refresh
+    # tool is run when the desktop has one, and a desktop without it is
+    # not an error — GNOME and KDE re-scan on login regardless.
+    refresh = shutil.which("update-desktop-database")
+    if refresh:
+        subprocess.run([refresh, str(apps_dir)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True, (f"{entry_path} — the app grid entry starts (or "
+                  "converges) the stack and opens the interface")
