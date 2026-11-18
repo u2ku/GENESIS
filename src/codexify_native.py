@@ -607,8 +607,6 @@ def build_environment(install: Path, python: Optional[str] = None,
     Contained: the environment lives inside the installation, in a directory
     that is already gitignored, and removing it removes the whole thing.
     """
-    if not shutil.which("ninja"):
-        return False, "ninja is not installed — please install it via your package manager (e.g., 'sudo pacman -S ninja' or 'brew install ninja')"
     interpreter, note = find_python(python)
     if interpreter is None:
         return False, note
@@ -622,14 +620,24 @@ def build_environment(install: Path, python: Optional[str] = None,
     venv_py = venv_python(install)
     if venv_py is None:
         return False, f"{venv_dir / 'bin' / 'python'} is not there"
-    runner([str(venv_py), "-m", "pip", "install", "--quiet", "--upgrade", "pip", "setuptools", "wheel", "meson-python", "ninja", "cython"], cwd=install, timeout=300.0)
+
+    venv_env = os.environ.copy()
+    venv_env["PATH"] = f"{venv_dir / 'bin'}{os.pathsep}{venv_env.get('PATH', '')}"
+
+    boot = runner([str(venv_py), "-m", "pip", "install", "--quiet", "--upgrade",
+                   "pip", "setuptools", "wheel", "meson-python", "ninja", "cython"],
+                  cwd=install, timeout=300.0, env=venv_env)
+    if boot.returncode != 0:
+        return False, (boot.stderr or boot.stdout
+                       or "the build toolchain could not be installed").strip()[-400:]
 
     requirements = native_requirements(
         install, python_version=_python_version(interpreter))
     if not requirements:
         return False, "there is no requirements.txt to install from"
-    done = runner([str(venv_py), "-m", "pip", "install", "--no-build-isolation", "--quiet",
-                   *requirements], cwd=install, timeout=timeout)
+    done = runner([str(venv_py), "-m", "pip", "install", "--no-build-isolation",
+                   "--prefer-binary", "--quiet", *requirements],
+                  cwd=install, timeout=timeout, env=venv_env)
     if done.returncode != 0:
         return False, (done.stderr or done.stdout
                        or "the install failed").strip()[-400:]
