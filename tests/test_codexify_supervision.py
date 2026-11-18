@@ -410,6 +410,77 @@ class TestTheOrphan(SupervisionCase):
         self.assertIn("by hand", message)
 
 
+class TestAskingTheDatabaseItself(SupervisionCase):
+    """`tables_actually_missing` — the healthz is a word; the database is
+    the answer. The probe translates the healthz's `_table_exists` names
+    into real table names, asks over the DSN from the `.env`, and returns
+    one of three verdicts."""
+
+    def _env_with_dsn(self):
+        codexify.write_env(self.install,
+                           {"DATABASE_URL": "postgresql://app:pw@127.0.0.1:1/db"})
+
+    def test_no_names_needs_no_database(self):
+        self.assertEqual(codexify.tables_actually_missing(self.install, []),
+                         ("present", ""))
+
+    def test_no_dsn_is_unknown_not_missing(self):
+        verdict, detail = codexify.tables_actually_missing(
+            self.install, ["projects_table_exists"])
+        self.assertEqual(verdict, "unknown")
+        self.assertIn("DATABASE_URL", detail)
+
+    def test_the_probe_asks_for_the_real_table_names(self):
+        """`projects_table_exists` is the healthz's spelling; the query
+        must ask for `projects`."""
+        self._env_with_dsn()
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(
+                cmd, 0, json.dumps([]), "")
+
+        with mock.patch.object(codexify.subprocess, "run",
+                               side_effect=fake_run):
+            codexify.tables_actually_missing(
+                self.install, ["projects_table_exists"])
+        probe = captured["cmd"][2]
+        self.assertIn("'projects'", probe)
+        self.assertNotIn("_table_exists", probe)
+
+    def test_a_database_that_answers_empty_says_missing(self):
+        """Every table asked for, none found: the verdict is the one the
+        healthz could never earn on its own."""
+        self._env_with_dsn()
+        with mock.patch.object(codexify.subprocess, "run",
+                               return_value=subprocess.CompletedProcess(
+                                   [], 0, json.dumps([]), "")):
+            verdict, detail = codexify.tables_actually_missing(
+                self.install, ["projects_table_exists"])
+        self.assertEqual(verdict, "missing")
+        self.assertIn("genuinely missing", detail)
+
+    def test_a_database_that_finds_them_says_present(self):
+        self._env_with_dsn()
+        with mock.patch.object(codexify.subprocess, "run",
+                               return_value=subprocess.CompletedProcess(
+                                   [], 0, json.dumps(["projects"]), "")):
+            verdict, detail = codexify.tables_actually_missing(
+                self.install, ["projects_table_exists"])
+        self.assertEqual(verdict, "present")
+        self.assertIn("errored", detail)
+
+    def test_a_database_that_errors_is_unknown(self):
+        self._env_with_dsn()
+        with mock.patch.object(codexify.subprocess, "run",
+                               return_value=subprocess.CompletedProcess(
+                                   [], 1, "", "connection refused")):
+            verdict, _ = codexify.tables_actually_missing(
+                self.install, ["projects_table_exists"])
+        self.assertEqual(verdict, "unknown")
+
+
 class TestASchemaRowThatIsNotAVerdict(SupervisionCase):
     """A diagnostic that failed is not a finding about the schema."""
 
@@ -438,10 +509,33 @@ class TestASchemaRowThatIsNotAVerdict(SupervisionCase):
         self.assertEqual(schema[0].mark, codexify.OK)
         self.assertIn("there", schema[0].detail)
 
-    def test_without_a_migration_the_row_still_believes_the_backend(self):
-        """A snapshot has no migration of its own to stand on."""
+    def test_without_a_migration_the_row_asks_the_database(self):
+        """A status pass has no migration of its own to stand on, so the
+        healthz's word is not enough — the database is asked, and a
+        database that says the tables are there clears the row."""
         with mock.patch.object(codexify, "port_holder",
-                               return_value=os.getpid()):
+                               return_value=os.getpid()), \
+             mock.patch.object(
+                 codexify, "tables_actually_missing",
+                 return_value=("present", "the tables are there")):
+            rows = codexify.readiness(self.install,
+                                      http_getter=self._getter,
+                                      skip_docker=True,
+                                      backend_pid=os.getpid())
+        schema = [row for row in rows if row.label == "the schema"]
+        self.assertEqual(schema[0].mark, codexify.OK)
+        self.assertIn("there", schema[0].detail)
+
+    def test_a_genuinely_missing_table_is_still_a_failure(self):
+        """The database is believed in both directions: a table it says
+        is not there is a failure, with the finding named."""
+        with mock.patch.object(codexify, "port_holder",
+                               return_value=os.getpid()), \
+             mock.patch.object(
+                 codexify, "tables_actually_missing",
+                 return_value=("missing",
+                               "the tables are genuinely missing: "
+                               "chat_threads_table_exists")):
             rows = codexify.readiness(self.install,
                                       http_getter=self._getter,
                                       skip_docker=True,
@@ -449,6 +543,23 @@ class TestASchemaRowThatIsNotAVerdict(SupervisionCase):
         schema = [row for row in rows if row.label == "the schema"]
         self.assertEqual(schema[0].mark, codexify.BAD)
         self.assertIn("did not land", schema[0].detail)
+
+    def test_an_unaskable_database_leaves_the_healthz_word_standing(self):
+        """No DSN, no venv, no psql — the healthz's word is all there
+        was, and the row says so rather than inventing a verdict."""
+        with mock.patch.object(codexify, "port_holder",
+                               return_value=os.getpid()), \
+             mock.patch.object(
+                 codexify, "tables_actually_missing",
+                 return_value=("unknown", "the database could not be "
+                               "asked")):
+            rows = codexify.readiness(self.install,
+                                      http_getter=self._getter,
+                                      skip_docker=True,
+                                      backend_pid=os.getpid())
+        schema = [row for row in rows if row.label == "the schema"]
+        self.assertEqual(schema[0].mark, codexify.BAD)
+        self.assertIn("the database could not be asked", schema[0].detail)
 
 
 class TestTheQuietStretches(SupervisionCase):

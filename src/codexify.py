@@ -1145,8 +1145,24 @@ def readiness(install: Path, *, runner: CommandRunner = _run_command,
                             "check errored (it says "
                             + ", ".join(missing_tables) + ")"))
         elif missing_tables:
-            rows.append(Row("the schema", BAD,
-                            "migrations did not land: " + ", ".join(missing_tables)))
+            # No migration evidence from this run — a status pass on a
+            # converged machine — so the healthz's word is all there is,
+            # and the healthz is a diagnostic that answers `false` when
+            # it errors. A bad row needs more than that: ask the database
+            # itself. Only a database that answered "genuinely missing"
+            # is a failure; one that answered "present" clears the row
+            # with the diagnostic named as what broke.
+            verdict, detail = tables_actually_missing(install, missing_tables)
+            if verdict == "missing":
+                rows.append(Row("the schema", BAD,
+                                "migrations did not land: " + detail))
+            elif verdict == "present":
+                rows.append(Row("the schema", OK, detail))
+            else:
+                rows.append(Row("the schema", BAD,
+                                "migrations did not land: "
+                                + ", ".join(missing_tables)
+                                + (" — " + detail if detail else "")))
         else:
             rows.append(Row("the schema", OK, "the tables are there"))
     else:
@@ -1232,6 +1248,80 @@ def _missing_tables(body: str) -> list[str]:
         return []
     return sorted(name for name, present in parsed.items()
                   if name.endswith("_table_exists") and present is False)
+
+
+def tables_actually_missing(install: Path,
+                            names: list[str]) -> tuple[bool, str]:
+    """Ask the database itself whether the tables are there.
+
+    `/healthz` is a diagnostic inside the backend, and a diagnostic that
+    errored answers `false` — which is indistinguishable, in its own
+    output, from a table that is genuinely not there. A readiness row is
+    a request that got an answer, so before a bad row is written on the
+    healthz's word alone, the database is asked directly: one query
+    against `information_schema`, as the app user, over the DSN the
+    install's `.env` carries.
+
+    Returns (verdict, detail). The verdict is "missing" when the database
+    answered and the tables are genuinely not there; "present" when it
+    answered and they are (the backend's own check errored); "unknown"
+    when the database could not be asked at all, and the healthz's word
+    stands.
+    """
+    if not names:
+        return "present", ""
+    env = read_env(install / ENV_FILE)
+    dsn = env.get("DATABASE_URL") or env.get("GUARDIAN_DATABASE_URL")
+    if not dsn:
+        return "unknown", "no DATABASE_URL in the .env to ask the database"
+    # The healthz names carry the `_table_exists` suffix; the tables are
+    # the names without it.
+    tables = ", ".join("'" + n.removesuffix("_table_exists").replace("'", "")
+                       + "'" for n in sorted(names))
+    probe = (
+        "import json, sys\n"
+        "import psycopg\n"
+        f"dsn = sys.argv[1]\n"
+        f"tables = [{tables}]\n"
+        "with psycopg.connect(dsn, connect_timeout=5) as conn:\n"
+        "    rows = conn.execute(\n"
+        "        \"SELECT table_name FROM information_schema.tables \"\n"
+        "        \"WHERE table_schema = 'public' AND table_name = ANY(%s)\",\n"
+        "        (tables,)).fetchall()\n"
+        "    print(json.dumps(sorted(r[0] for r in rows)))\n"
+    )
+    venv_py = _native_venv_python(install)
+    cmd = ([str(venv_py), "-c", probe, dsn] if venv_py is not None
+           else [sys.executable, "-c", probe, dsn])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown", "the database could not be asked"
+    if proc.returncode != 0:
+        return "unknown", ("the database could not be asked: "
+                           + (proc.stderr or "").strip()[-200:])
+    try:
+        present = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        return "unknown", "the database's answer was not readable"
+    really_missing = [n for n in names
+                      if n.removesuffix("_table_exists") not in present]
+    if really_missing:
+        return "missing", ("the tables are genuinely missing: "
+                           + ", ".join(really_missing))
+    return "present", ("the tables are there — the backend's own table "
+                       "check errored (it says "
+                       + ", ".join(sorted(names)) + ")")
+
+
+def _native_venv_python(install: Path) -> Optional[Path]:
+    """The install's venv interpreter, when the native path made one."""
+    for candidate in (install / ".native" / "venv" / "bin" / "python3",
+                      install / "venv" / "bin" / "python3"):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _chat_detail(body: str) -> str:
