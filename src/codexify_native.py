@@ -60,24 +60,35 @@ if str(TOOLS) not in sys.path:
 import codexify  # noqa: E402  — the shared types, the masking, the presets
 
 def prompt_and_fix_services(missing: list[str]) -> bool:
-    """Prompt the operator to automatically install and start missing system services."""
+    """Offer to install the missing system services, and do it on a yes.
+
+    The offer is a question, and a question is only asked where there is
+    someone to answer it. A piped run, a test, a cron'd wizard gets the
+    commands printed and the caller's honest prerequisite exit instead —
+    never a hang on a prompt nobody can answer.
+    """
     hints = get_service_hints(missing)
     if not hints:
         return True
 
     print(f"\nMissing system services detected: {', '.join(missing)}")
     print(f"Proposed commands:\n  {hints}")
-
-    choice = input("\nWould you like to execute these commands automatically? [y/N]: ").strip().lower()
+    if (not sys.stdin.isatty()
+            or getattr(prompt_and_fix_services, "no_prompts", False)):
+        return False
+    try:
+        choice = input("\nWould you like to execute these commands "
+                       "automatically? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
     if choice in ("y", "yes"):
         print("Executing system configuration...")
         done = subprocess.run(hints, shell=True)
         if done.returncode == 0:
             print("✓ Services installed and started successfully.")
             return True
-        else:
-            print("✗ Command execution failed. Please run them manually.")
-            return False
+        print("✗ Command execution failed. Please run them manually.")
+        return False
     return False
 
 
@@ -231,11 +242,20 @@ def get_service_hints(missing: Iterable[str]) -> str:
             commands.append("brew services start redis")
         return " && ".join(commands)
     else:
+        # The Arch posture. pacman gets the packages and systemd starts
+        # them, but a fresh postgresql needs its cluster initialized
+        # first, as the postgres user, in the directory the unit expects.
+        # The initdb is guarded — a postgres that is installed and
+        # initialized but merely stopped must not have its data directory
+        # re-initialized out from under it, and a failing command in the
+        # chain would take the systemctl after it down with it.
         commands = []
         if "postgres" in missing:
             commands.append("sudo pacman -S --needed postgresql")
-            commands.append("sudo -u postgres initdb -D /var/lib/postgres/data")
-        commands.append("sudo systemctl enable --now postgresql")
+            commands.append("[ -d /var/lib/postgres/data ] || "
+                            "sudo -u postgres initdb "
+                            "-D /var/lib/postgres/data")
+            commands.append("sudo systemctl enable --now postgresql")
         if "redis" in missing:
             commands.append("sudo pacman -S --needed redis")
             commands.append("sudo systemctl enable --now redis")

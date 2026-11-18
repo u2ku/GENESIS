@@ -297,6 +297,103 @@ class TestTheDetection(NativeCase):
             "redis://127.0.0.1:6379/0", None)
 
 
+class TestTheServicePrompt(NativeCase):
+    """The Arch offer: install the missing services, or print and step aside."""
+
+    def test_a_piped_run_gets_the_commands_and_runs_nothing(self):
+        """A wizard without a terminal is a wizard without answers: the
+        commands are printed, nothing is executed, and the caller's
+        prerequisite exit decides what happens next."""
+        import subprocess
+        ran = []
+        real_run = subprocess.run
+        subprocess.run = lambda *a, **k: (ran.append((a, k)),
+                                          subprocess.CompletedProcess((), 0))[1]
+        native.prompt_and_fix_services.no_prompts = True
+        try:
+            self.assertFalse(native.prompt_and_fix_services(["redis"]))
+        finally:
+            del native.prompt_and_fix_services.no_prompts
+            subprocess.run = real_run
+        self.assertFalse(ran)
+
+    def test_a_yes_runs_what_was_proposed(self):
+        """A yes in a terminal runs the proposed chain — that is the offer,
+        and the chain is whatever the platform's hint said it was."""
+        import subprocess
+        ran = []
+        real_run = subprocess.run
+        subprocess.run = lambda hints, **k: (ran.append(hints),
+                                             subprocess.CompletedProcess((), 0))[1]
+        real_stdin = sys.stdin
+        sys.stdin = _FakeTTY(["y\n"])
+        try:
+            self.assertTrue(native.prompt_and_fix_services(["redis"]))
+        finally:
+            sys.stdin = real_stdin
+            subprocess.run = real_run
+        self.assertEqual(ran, [native.get_service_hints(["redis"])])
+
+    def test_a_decline_runs_nothing(self):
+        """Anything but a yes is a no, and a no runs nothing."""
+        import subprocess
+        ran = []
+        real_run = subprocess.run
+        subprocess.run = lambda *a, **k: (ran.append((a, k)),
+                                          subprocess.CompletedProcess((), 0))[1]
+        real_stdin = sys.stdin
+        sys.stdin = _FakeTTY(["\n"])
+        try:
+            self.assertFalse(native.prompt_and_fix_services(["redis"]))
+        finally:
+            sys.stdin = real_stdin
+            subprocess.run = real_run
+        self.assertFalse(ran)
+
+    def test_the_arch_hint_scopes_the_postgres_commands_to_a_missing_postgres(self):
+        """A machine that is missing only redis is not told to enable
+        postgresql, and the initdb the postgres install needs is guarded —
+        an initialized-but-stopped postgres keeps its cluster."""
+        old = sys.platform
+        sys.platform = "linux"
+        try:
+            hint = native.get_service_hints(["redis"])
+        finally:
+            sys.platform = old
+        self.assertIn("sudo pacman -S --needed redis", hint)
+        self.assertIn("sudo systemctl enable --now redis", hint)
+        self.assertNotIn("postgresql", hint)
+
+        sys.platform = "linux"
+        try:
+            hint = native.get_service_hints(["postgres"])
+        finally:
+            sys.platform = old
+        self.assertIn("sudo pacman -S --needed postgresql", hint)
+        self.assertIn("[ -d /var/lib/postgres/data ] ||", hint)
+        self.assertLess(hint.index("pacman -S --needed postgresql"),
+                        hint.index("initdb"))
+        self.assertLess(hint.index("initdb"),
+                        hint.index("systemctl enable --now postgresql"))
+
+
+class _FakeTTY:
+    """A stdin that says what it is told: a terminal, and lines of it."""
+
+    def __init__(self, lines):
+        self._lines = iter(lines)
+
+    def isatty(self):
+        return True
+
+    def readline(self):
+        return next(self._lines)
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+
 class TestTheProcesses(NativeCase):
 
     def test_a_stopped_supervisor_is_not_running(self):
