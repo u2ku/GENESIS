@@ -227,6 +227,16 @@ BACKENDS = {
         "auth": "x-api-key",
         "needs_shim": True,
         "shim_upstream": "http://100.71.144.117:8000/v1",
+        # No tools, measured rather than assumed: the supergemma tune on
+        # the tailnet broker answers a system-plus-tools request with
+        # pages of <|channel> markers — deterministically, per the probe
+        # (tools/luna_probe.py), so sending tools first costs a full
+        # max_tokens generation of marker spam on every turn and a second
+        # generation for the real answer. The grounding discipline still
+        # holds for the operator — /stamp, /plan, /record run the engine
+        # from the terminal — but the model on this substrate cannot call
+        # anything, and is not offered the chance to loop trying.
+        "no_tools": True,
     },
     # OpenAI speaks /v1/chat/completions, which is not a protocol Claude
     # Code speaks. The shim (src/shim.py) is the translation layer, so this
@@ -1141,6 +1151,12 @@ def talk(prompt, max_turns=12, verbose=False, messages=None,
     else:
         messages.append({"role": "user", "content": prompt})
     tools = tool_specs()
+    # A backend marked no_tools never sends them: the substrate is known
+    # (probed, not assumed) to collapse under the system-plus-tools shape.
+    # The marker-spam retry below still guards the case a backend does not
+    # mark — a tune that loops only sometimes.
+    if BACKENDS.get(backend, {}).get("no_tools"):
+        tools = []
     registry = {n: fn for n, _, fn, _ in TOOLS}
     used_any_tool = False
     tool_failed = False
@@ -1185,8 +1201,12 @@ def talk(prompt, max_turns=12, verbose=False, messages=None,
 
         if not tool_uses:
             # Grounding discipline: an answer that depends on a chart, a stamp
-            # or a line of the record must be run, not recalled.
-            needs = any(t in prompt.lower() for t in GROUNDED_TERMS)
+            # or a line of the record must be run, not recalled. A substrate
+            # with no tools on offer cannot be nudged into calling one, so
+            # the nudge does not fire there — it would be a second request
+            # asking for the impossible.
+            needs = (any(t in prompt.lower() for t in GROUNDED_TERMS)
+                     and not BACKENDS.get(backend, {}).get("no_tools"))
             if needs and not used_any_tool and not nudged:
                 nudged = True
                 messages.append({"role": "assistant", "content": content})

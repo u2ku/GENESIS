@@ -53,6 +53,35 @@ class TestTheLunaBackend(unittest.TestCase):
         self.assertEqual(base, codexify.DEFAULT_REMOTE_RUNTIME_ENDPOINT)
         self.assertEqual(model, codexify.DEFAULT_REMOTE_RUNTIME_MODEL)
 
+    def test_the_backend_sends_no_tools(self):
+        """"The tune's template collapses under system-plus-tools —
+        deterministically, per the probe — so the backend that rides on
+        it never offers the shape: no wasted max_tokens generation of
+        marker spam, no second generation for the real answer."""
+        self.assertTrue(harness.BACKENDS["luna"].get("no_tools"))
+
+    def test_talk_sends_no_tools_on_a_no_tools_backend(self):
+        """The flag is honored in the request, and the grounding nudge
+        does not fire — a substrate with no tools on offer cannot be
+        asked to call one."""
+        seen = []
+
+        def fake_post(payload, backend="luna"):
+            seen.append(payload)
+            return {"content": [{"type": "text",
+                                 "text": "The node is ready."}]}
+
+        with unittest.mock.patch.object(harness, "_post",
+                                        side_effect=fake_post), \
+             unittest.mock.patch.object(harness, "system_prompt",
+                                        return_value="the card"), \
+             unittest.mock.patch.object(harness, "ensure_shim"):
+            out = harness.talk("what does the record say about the arc",
+                               backend="luna")
+        self.assertEqual(out, "The node is ready.")
+        self.assertEqual(len(seen), 1, "the nudge did not fire")
+        self.assertNotIn("tools", seen[0])
+
     def test_a_recorded_runtime_wins_over_the_default(self):
         """The install is context: its `.env` decides where chat talks.
         A recorded endpoint and model must be read, not overridden."""
@@ -176,7 +205,11 @@ class TestTemplateCollapse(unittest.TestCase):
              unittest.mock.patch.object(harness, "system_prompt",
                                         return_value="the card"), \
              unittest.mock.patch.object(harness, "ensure_shim"):
-            out = harness.talk("Hello", backend="luna")
+            # openai, not luna: this class tests the retry machinery,
+            # which belongs to every tools-sending backend. luna is marked
+            # no_tools — it never sends the shape that triggers the spam,
+            # so it cannot reach the retry.
+            out = harness.talk("Hello", backend="openai")
         return out, seen
 
     def test_marker_spam_is_detected(self):
