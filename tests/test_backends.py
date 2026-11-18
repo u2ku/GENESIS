@@ -54,7 +54,10 @@ class TestTheOneTable(unittest.TestCase):
         for name, backend in harness.BACKENDS.items():
             self.assertIn("key", backend, name)
             self.assertIn("model", backend, name)
-            if name == "mlx":
+            if backend["key"] == "mlxflex":
+                # The keyless sentinel, not a key variable: the local
+                # server (mlx) and the tailnet broker behind the luna
+                # backend both need no key from this machine.
                 continue
             self.assertIn(backend["auth"], ("x-api-key", "bearer"), name)
             self.assertTrue(backend["key"].isupper(), name)

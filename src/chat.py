@@ -35,11 +35,14 @@ def _harness():
 
 def _banner(style, backend: str, harness) -> str:
     where = harness.BACKENDS.get(backend, {}).get("where", backend)
+    codexify_note = ""
+    if backend == "luna" and not harness.codexify_installed():
+        codexify_note = "\n " + style.soft(harness.CODEXIFY_NOTE)
     return style.banner(
         "G E N E S I S",
         "the reality, held",
         f"talking on {where}  ·  ask in your own words  ·  /paste for long "
-        f"text  ·  /help",
+        f"text  ·  /help" + codexify_note,
     )
 
 
@@ -96,6 +99,8 @@ def _turn(text, messages, backend, style, harness):
     except RuntimeError as exc:
         messages[:] = snapshot
         _notice(style, f"the substrate is unreachable: {exc}")
+        if backend == "luna" and not harness.codexify_installed():
+            _notice(style, harness.CODEXIFY_NOTE)
         return None
     if not reply:
         messages[:] = snapshot
@@ -151,7 +156,7 @@ _CHAT_HELP = [
         ("/paste", "long text, until /send"),
     ]),
     ("THE GROUND", [
-        ("/backend", "mlx | openrouter — the substrate"),
+        ("/backend", "mlx | luna | openrouter · · · — the substrate"),
         ("/model", "the model on this substrate"),
         ("/voice", "the voice"),
         ("/tts", "voice on or off"),
@@ -215,12 +220,14 @@ def _handle_slash(line, state, style, unicode_ok) -> bool:
             state["backend"] = rest[0]
             _notice(style, f"backend: {state['backend']} — "
                            f"{harness.BACKENDS[state['backend']]['where']}")
+            if state["backend"] == "luna" and not harness.codexify_installed():
+                _notice(style, harness.CODEXIFY_NOTE)
         else:
             _notice(style, "unknown backend: " + rest[0])
         return True
 
     if command == "/model":
-        model = harness.BACKENDS[state["backend"]]["model"]
+        model = harness.backend_model(state["backend"])
         _notice(style, f"model: {model}")
         return True
 
@@ -349,6 +356,8 @@ def chat(backend: str = "mlx", *, message: str = "", tts: bool = True,
 
 def _one_shot(message: str, backend: str, style, tts: bool, harness) -> int:
     """One exchange, no banner, no prompt."""
+    if backend == "luna" and not harness.codexify_installed():
+        _notice(style, harness.CODEXIFY_NOTE)
     reply = _turn(message, [], backend, style, harness)
     if reply is None:
         return 1

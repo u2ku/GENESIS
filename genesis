@@ -1265,7 +1265,7 @@ def cmd_chat(args, ctx):
         return 1
     backend = ctx.backend
     message = " ".join(args.message).strip() if args.message else ""
-    if message and message in ("mlx", "openrouter"):
+    if message and message in ("mlx", "luna", "openrouter"):
         backend = message
         message = ""
     return chat_module.chat(backend=backend, message=message,

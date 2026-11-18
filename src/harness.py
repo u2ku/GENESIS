@@ -211,6 +211,23 @@ BACKENDS = {
         "where": "MiniMax",
         "auth": "bearer",
     },
+    # Luna's model server, over the tailnet. The Mac Studio's Whoosh'd
+    # broker (the same runtime `genesis codexify` provisions and records —
+    # DEFAULT_REMOTE_RUNTIME_ENDPOINT) is OpenAI-shaped, so this backend
+    # goes through the shim like the openai one does. The shim is started
+    # pointed at the tailnet address, never localhost: this backend exists
+    # so a machine whose runtime is the Studio's keeps working away from
+    # home. No key — the broker is tailnet-internal, so the sentinel is
+    # the same as the local server's.
+    "luna": {
+        "url": "http://127.0.0.1:8790/messages",
+        "model": "supergemma4-26b-uncensored",
+        "key": "mlxflex",
+        "where": "Luna's model server on the tailnet, through the local shim",
+        "auth": "x-api-key",
+        "needs_shim": True,
+        "shim_upstream": "http://100.71.144.117:8000/v1",
+    },
     # OpenAI speaks /v1/chat/completions, which is not a protocol Claude
     # Code speaks. The shim (src/shim.py) is the translation layer, so this
     # backend talks to the shim, and the shim talks to OpenAI.
@@ -638,6 +655,77 @@ class PromptError(Exception):
     """The editable prompt cannot be read as written."""
 
 
+# The shim this process started for a needs_shim backend, if it did.
+_SHIM = {"proc": None, "port": None, "upstream": None}
+
+
+def _port_answers(url: str, timeout: float = 1.0) -> bool:
+    """Does something already listen where the shim should be?"""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True  # it answered; the status is the route's business
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def ensure_shim(backend: str = "luna") -> None:
+    """See that a shim is answering for this backend, or start one.
+
+    A needs_shim backend names its own upstream (`shim_upstream`), and one
+    port holds one upstream — the wizard's LaunchAgent serves the gateway
+    it was given, which is not necessarily this backend's. So the harness
+    starts its own shim when nothing answers on the backend's port, and
+    leaves an existing listener alone rather than guessing whose it is.
+    """
+    b = BACKENDS[backend]
+    if not b.get("needs_shim"):
+        return
+    port = int(b["url"].rsplit(":", 1)[1].split("/")[0])
+    upstream = b.get("shim_upstream")
+    if backend == "luna":
+        # The recorded runtime, not the table's default: the install
+        # decides where this machine's model server lives.
+        upstream = luna_runtime()[0]
+    if _SHIM["proc"] is not None and _SHIM["port"] == port:
+        return
+    if _port_answers(b["url"]):
+        return
+    shim = SRC / "shim.py"
+    env = dict(os.environ, GENESIS_SHIM_UPSTREAM=upstream,
+               GENESIS_SHIM_PORT=str(port))
+    proc = subprocess.Popen(
+        [sys.executable, str(shim), "--upstream", upstream,
+         "--port", str(port)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, env=env,
+        start_new_session=(os.name == "posix"))
+    _SHIM.update(proc=proc, port=port, upstream=upstream)
+    # Give it a beat to bind. A fast failure reads as an unreachable
+    # substrate on the first turn, which names nothing.
+    for _ in range(20):
+        if proc.poll() is not None or _port_answers(b["url"]):
+            break
+        time.sleep(0.1)
+
+
+def stop_shim():
+    """Take down the shim this process started. Not the one it found."""
+    proc = _SHIM["proc"]
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+        proc.wait(timeout=2)
+    except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
+        pass
+    _SHIM.update(proc=None, port=None, upstream=None)
+
+
 def grounding_block() -> str:
     """The three primary signs, as the engine holds them right now.
 
@@ -826,6 +914,12 @@ def _post(payload, backend="mlx"):
     key as OPENROUTER_API_KEY.
     """
     b = BACKENDS[backend]
+    if b.get("needs_shim"):
+        # The shim is part of this backend's path: without it there is
+        # nothing on the port to talk to. It is ensured here, per request,
+        # so a shim that died mid-conversation is replaced on the next
+        # turn rather than ending the session.
+        ensure_shim(backend)
     # The VARIABLE NAME and the VALUE are two things, and the error message
     # needs the first one. Reusing one name for both loses it: the message
     # used to read " is not set", which names nothing and tells a new user
@@ -921,6 +1015,82 @@ SEEDS = {
 }
 
 
+def codexify_installed() -> bool:
+    """Is there a provisioned Codexify install to owe a model server?
+
+    The `luna` backend rides on the runtime `genesis codexify` provisions
+    and records. The question here is the cheap half of codexify's own
+    `is_setup_done` — an installation that exists and carries a `.env` —
+    because the note this answers for is a pointer, not a readiness
+    claim: it names the command that was skipped, and running it is the
+    operator's call.
+    """
+    for candidate in _codexify_candidates():
+        if ((candidate / "docker-compose.yml").is_file()
+                and (candidate / ".env.template").is_file()
+                and (candidate / ".env").is_file()):
+            return True
+    return False
+
+
+CODEXIFY_NOTE = ("this machine has not run `genesis codexify` yet — the "
+                 "model server the chat rides on is not provisioned here. "
+                 "Run `genesis codexify`, then come back.")
+
+
+def _env_values(path: Path) -> dict[str, str]:
+    """The KEY=VALUE lines of an env file, unquoted. A missing file: {}."""
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        out[k.strip()] = v.strip().strip("'\"")
+    return out
+
+
+def _codexify_candidates() -> list[Path]:
+    return [ROOT / "codexify-core", ROOT.parent / "codexify-core",
+            Path.home() / "codexify-core"]
+
+
+def luna_runtime() -> tuple[str, str]:
+    """(upstream base, model) — the runtime the codexify install recorded.
+
+    Context-aware, deliberately: `genesis codexify` is the step that
+    decides what this machine talks to — a Studio-hosted broker over the
+    tailnet, or a runtime on the machine itself — and writes that choice
+    down (`CODEXIFY_RUNTIME_ENDPOINT`, `CODEXIFY_MODEL`). The chat rides
+    on the same decision rather than a second one made in this file, so
+    the install is the one place the answer lives.
+
+    Without an install, the tailnet default is the answer — the same
+    `DEFAULT_REMOTE_RUNTIME_ENDPOINT` codexify itself falls back to — so
+    the backend still speaks, and speaks to the right broker, before the
+    install has ever run.
+    """
+    for candidate in _codexify_candidates():
+        values = _env_values(candidate / ".env")
+        base = (values.get("CODEXIFY_RUNTIME_ENDPOINT")
+                or values.get("OPENAI_API_BASE"))
+        model = values.get("CODEXIFY_MODEL")
+        if base:
+            return base, model or "supergemma4-26b-uncensored"
+    return ("http://100.71.144.117:8000/v1", "supergemma4-26b-uncensored")
+
+
+def backend_model(backend: str) -> str:
+    """The model to ask for on this backend, as the install recorded it."""
+    if backend == "luna":
+        return luna_runtime()[1]
+    return BACKENDS[backend]["model"]
+
+
 def expand(text):
     """Turn a plain phrase into a prompt Genesis can ground."""
     low = text.strip().lower()
@@ -967,7 +1137,7 @@ def talk(prompt, max_turns=12, verbose=False, messages=None,
 
     for turn in range(max_turns):
         resp = _post({
-            "model": BACKENDS[backend]["model"],
+            "model": backend_model(backend),
             "max_tokens": 1200,
             "system": system_prompt(),
             "tools": tools,
