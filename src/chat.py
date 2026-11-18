@@ -165,6 +165,8 @@ _CHAT_HELP = [
     ("THE ENGINE", [
         ("/id", "the identity constant"),
         ("/plan", "the 2031 arc"),
+        ("/pattern", "the numergram"),
+        ("/symbols", "the symbolic blocks"),
         ("/stamp", "the grounding stamp for this moment"),
         ("/aeon", "the 8-bit word"),
         ("/shield A B", "two moments, composed"),
@@ -255,6 +257,29 @@ def _handle_slash(line, state, style, unicode_ok) -> bool:
 
     if command == "/plan":
         _engine(style, harness, "prediction")
+        return True
+
+    if command == "/pattern":
+        # The numergram, the way `genesis pattern` prints it -- the
+        # chat says the engine's word, not a paraphrase of it.
+        if rest:
+            _tool_block(style, harness.t_engine(
+                {"command": "numergram", "args": list(rest)}))
+        else:
+            _engine(style, harness, "pattern")
+        return True
+
+    if command == "/symbols":
+        # The symbolic blocks, the way `genesis symbols` prints them.
+        # A block name gives that block alone; --all dumps every one.
+        if rest and rest[0] == "--all":
+            _tool_block(style, harness.t_engine(
+                {"command": "symbols", "args": ["--all"]}))
+        elif rest:
+            _tool_block(style, harness.t_engine(
+                {"command": "symbols", "args": [rest[0]]}))
+        else:
+            _engine(style, harness, "symbols")
         return True
 
     if command == "/stamp":
