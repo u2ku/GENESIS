@@ -225,8 +225,9 @@ BREW_PACKAGES = {
     "postgres": "postgresql@15",
     "redis": "redis",
     "python": "python@3.11",
+    "pnpm": "pnpm",
 }
-BREW_INSTALL = "brew install postgresql@15 redis python@3.11"
+BREW_INSTALL = "brew install postgresql@15 redis python@3.11 pnpm"
 
 
 def get_service_hints(missing: Iterable[str]) -> str:
@@ -261,6 +262,8 @@ def get_service_hints(missing: Iterable[str]) -> str:
             commands.append("sudo systemctl enable --now redis")
         if "python" in missing:
             commands.append("sudo pacman -S --needed python python-pip")
+        if "pnpm" in missing:
+            commands.append("sudo pacman -S --needed pnpm")
         return " && ".join(commands)
 
 def brew_hint(missing: Iterable[str]) -> str:
@@ -674,7 +677,8 @@ def detect(install: Path, *, python: Optional[str] = None,
     pnpm = shutil.which("pnpm")
     rows.append(Row("the interface", OK if pnpm else MANUAL,
                     f"pnpm {pnpm}" if pnpm else
-                    "pnpm is not here — the API works without it"))
+                    "pnpm is not here — the API works without it — run: "
+                    + brew_hint(["pnpm"])))
 
     override_base, override_model = runtime_endpoint_override(install)
     if override_base:
@@ -1397,6 +1401,23 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
         report.verdict = ("the stores are missing — nothing was written. "
                           "Run the commands above, then run this again.")
         return report
+
+    # -- the interface's dependency ---------------------------------------
+    # pnpm is the interface's whole universe, and a run that asked for
+    # the interface cannot have it without pnpm. It gets the same offer
+    # the stores get — a terminal says yes and it is installed; a piped
+    # run is told the command and exits before the venv build spends its
+    # minutes on a stack that cannot finish.
+    if with_ui and not shutil.which("pnpm"):
+        prompt_and_fix_services(["pnpm"])
+        if not shutil.which("pnpm"):
+            report.add("the interface's dependencies", BAD,
+                       "pnpm is not here — run: " + brew_hint(["pnpm"]))
+            report.exit_code = EXIT_PREREQUISITE
+            report.verdict = ("the interface was asked for and pnpm is "
+                              "missing — nothing was built. Run the command "
+                              "above, then run this again.")
+            return report
 
     # -- configure ---------------------------------------------------------
     env_path = install / codexify.ENV_FILE

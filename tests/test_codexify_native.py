@@ -534,6 +534,54 @@ class TestTheRemoteRuntime(NativeCase):
         self.assertIn("did not answer", row.detail)
 
 
+class TestTheInterfaceStep(NativeCase):
+    """pnpm is the interface's universe, and it is a step, not a footnote."""
+
+    def test_pnpm_is_hinted_not_silently_manual(self):
+        """The interface's whole universe is pnpm, and a machine without
+        it is told the one command that gets it — on both platforms."""
+        self.assertIn("brew install pnpm", native.brew_hint(["pnpm"]))
+        old = sys.platform
+        sys.platform = "linux"
+        try:
+            hint = native.get_service_hints(["pnpm"])
+        finally:
+            sys.platform = old
+        self.assertIn("sudo pacman -S --needed pnpm", hint)
+
+    def test_a_run_asking_for_the_interface_fails_fast_without_pnpm(self):
+        """With the interface asked for and pnpm missing, the offer is
+        made and the run exits before the venv build spends its minutes
+        on a stack that cannot finish."""
+        def runner(args, cwd=None, timeout=120.0, env=None):
+            import subprocess
+            return subprocess.CompletedProcess(args, 0, "ok", "")
+
+        real_which = native.shutil.which
+        native.shutil.which = (lambda name: None if name == "pnpm"
+                               else real_which(name))
+        original = native.tcp_open
+        native.tcp_open = lambda host, port, timeout=1.5: True
+        native.prompt_and_fix_services.no_prompts = True
+        try:
+            report = native.setup(self.install, with_ui=True, runner=runner,
+                                  http_getter=self.getter)
+        finally:
+            native.shutil.which = real_which
+            native.tcp_open = original
+            del native.prompt_and_fix_services.no_prompts
+        self.assertEqual(report.exit_code, native.EXIT_PREREQUISITE)
+        row = next(r for r in report.rows
+                   if r.label == "the interface's dependencies")
+        self.assertIn("pnpm is not here", row.detail)
+        self.assertIn("brew install pnpm", row.detail)
+        # Fail fast: the configuration and the environment never ran.
+        self.assertFalse(any(r.label == "the configuration"
+                             for r in report.rows))
+        self.assertFalse((self.install / ".env").exists())
+        self.assertIn("nothing was built", report.verdict)
+
+
 class TestTheSystemdSupervisor(NativeCase):
     """Linux runs the supervisor as a user unit, and it survives logout."""
 

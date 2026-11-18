@@ -1099,7 +1099,7 @@ def cmd_codexify(args, ctx):
                 preset=getattr(args, "preset", None),
                 model=getattr(args, "model", None),
                 cloud=bool(getattr(args, "allow_cloud", False)),
-                with_ui=bool(getattr(args, "with_ui", False)),
+                with_ui=_codexify_wants_ui(args),
                 dry_run=bool(getattr(args, "dry_run", False)),
                 launcher=getattr(args, "launcher", None),
             )
