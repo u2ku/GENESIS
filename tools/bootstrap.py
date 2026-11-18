@@ -453,6 +453,19 @@ def build_plan(ctx, profile: dict) -> list:
             {"present": path.is_dir()},
             "none" if path.is_dir() else "create"))
 
+    # -- the voice. The standard tier, not the wizard's: a machine with
+    #    no gateway key is still a machine that speaks. Kokoro needs no
+    #    credential, and the wizard's one prompt is a key prompt.
+    if ctx.no_voice:
+        # Same honesty rule as Codexify: opting out is a choice, but a
+        # machine that cannot speak should not pass silently either way.
+        actions.append(_action(
+            "kokoro-voice", "probe", "voice",
+            {"configured": True}, {"configured": False}, "none",
+            note="skipped by --no-voice; he stays silent on this machine"))
+    else:
+        actions.extend(_voice_actions(ctx))
+
     # -- the node profile.
     profile_content = _node_profile_content(ctx, profile)
     actions.append(_action(
@@ -662,16 +675,6 @@ def _wizard_actions(ctx) -> list:
             credential=False))
 
     actions.extend(_shim_actions(ctx))
-
-    if ctx.no_voice:
-        # Same honesty rule as Codexify: opting out is a choice, but a
-        # machine that cannot speak should not pass silently either way.
-        actions.append(_action(
-            "kokoro-voice", "probe", "voice",
-            {"configured": True}, {"configured": False}, "none",
-            note="skipped by --no-voice; he stays silent on this machine"))
-    else:
-        actions.extend(_voice_actions(ctx))
 
     if not ctx.no_codexify and ctx.codexify_dir:
         codexify_env = ctx.codexify_dir / ".env"
