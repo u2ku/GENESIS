@@ -1721,14 +1721,26 @@ LAUNCHER_SCRIPT = """#!/bin/bash
 # what it asks about and what it starts -- with the interface, not the
 # API. Opening the API would land a person on a JSON endpoint, which is
 # not the app they came to open.
+#
+# Everything this does is written to the log. A tile clicked in an app
+# grid has no terminal, so a launcher that fails quietly is one nobody
+# can debug -- and "the log does not exist" cannot be allowed to mean
+# both "it never ran" and "it ran and had nothing to say".
+exec >> "@LOG@" 2>&1
+echo "--- $(date '+%F %T') launcher started"
 if ! curl -s -o /dev/null --max-time 2 http://127.0.0.1:5173/; then
+  echo "the interface is not answering -- converging the stack"
   # The launcher owns the opening; the setup it calls never opens one.
-  GENESIS_NO_BROWSER=1 "$GENESIS" codexify setup --with-ui >> "$LOG" 2>&1
+  GENESIS_NO_BROWSER=1 "@GENESIS@" codexify setup --with-ui >> "@LOG@" 2>&1
+  echo "setup finished (exit $?)"
+else
+  echo "the interface is already answering"
 fi
 # The browser is for the person who double-clicked this. A test run or an
 # agent's shell says GENESIS_NO_BROWSER, and then the stack still
 # converges and no window opens on anyone's desk.
 if [ -n "$GENESIS_NO_BROWSER" ]; then
+  echo "GENESIS_NO_BROWSER is set -- not opening a browser"
   exit 0
 fi
 # On a cold start the interface takes a moment to bind -- vite resolves
@@ -1737,13 +1749,31 @@ fi
 # what is guaranteed to answer.
 for _ in {1..20}; do
   if curl -s -o /dev/null --max-time 2 http://127.0.0.1:5173/; then
-    $OPENER http://127.0.0.1:5173
+    @OPENER@ http://127.0.0.1:5173
+    echo "asked @OPENER@ to open the interface (exit $?)"
     exit 0
   fi
   sleep 1
 done
-$OPENER http://127.0.0.1:8888
+echo "the interface never answered -- falling back to the API"
+@OPENER@ http://127.0.0.1:8888
+echo "asked @OPENER@ to open the API (exit $?)"
 """
+
+
+def render_launcher_script(genesis_bin: str, log: Path, opener: str) -> str:
+    """The launcher script, with its three blanks filled in.
+
+    The blanks are `@TOKEN@`s because a shell script is full of `$`
+    names, and a `$GENESIS` blank is the prefix of `$GENESIS_NO_BROWSER`:
+    filling it rewrote that variable into a path, which made "is the
+    browser suppressed?" true on every machine, and the launcher exited
+    before opening anything. A token that is not a prefix of anything
+    cannot do that.
+    """
+    return (LAUNCHER_SCRIPT.replace("@GENESIS@", genesis_bin)
+                           .replace("@LOG@", str(log))
+                           .replace("@OPENER@", opener))
 
 
 def make_launcher(install: Path, where: str,
@@ -1817,9 +1847,7 @@ def make_launcher(install: Path, where: str,
                             / "app.icns")
         script = (root / "Contents" / "MacOS" / "Codexify")
         script.write_text(
-            LAUNCHER_SCRIPT.replace("$GENESIS", genesis_bin)
-                          .replace("$LOG", str(logs / "launcher.log"))
-                          .replace("$OPENER", "open"),
+            render_launcher_script(genesis_bin, logs / "launcher.log", "open"),
             encoding="utf-8")
         script.chmod(0o755)
         try:
@@ -1856,7 +1884,12 @@ def _desktop_entry_text(install: Path, script: Path, icon: Optional[Path],
         lines.append("Terminal=true")
     else:
         lines.append("Terminal=false")
-    lines.append("StartupWMClass=Codexify")
+    # The shell shows "launching" until a window claiming this app
+    # appears, and gives up after its own timeout. This entry opens a
+    # tab in whatever browser the person has -- a window that will never
+    # claim to be Codexify -- so the promise of one is a spinner that
+    # runs out and reads as a launch that failed.
+    lines.append("StartupNotify=false")
     lines.append("X-GNOME-UsesNotifications=false")
     return "\n".join(lines) + "\n"
 
@@ -1928,10 +1961,8 @@ def _make_desktop_entry(install: Path, where: str, genesis_bin: str,
         with tempfile.NamedTemporaryFile("w", dir=script.parent,
                                          delete=False,
                                          encoding="utf-8") as tmp:
-            tmp.write(LAUNCHER_SCRIPT
-                      .replace("$GENESIS", genesis_bin)
-                      .replace("$LOG", str(logs / "launcher.log"))
-                      .replace("$OPENER", "xdg-open"))
+            tmp.write(render_launcher_script(
+                genesis_bin, logs / "launcher.log", "xdg-open"))
             tmp_path = Path(tmp.name)
         tmp_path.replace(script)
         script.chmod(0o755)

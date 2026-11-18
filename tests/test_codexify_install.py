@@ -508,6 +508,30 @@ class DesktopEntryCase(unittest.TestCase):
         return (self.fake_home / ".local" / "share" / "icons" / "hicolor"
                 / "256x256" / "apps" / "codexify.png")
 
+    def test_the_entry_does_not_promise_a_window_it_cannot_deliver(self):
+        """The tile opens a tab in the person's own browser, a window that
+        never claims to be Codexify. A shell told to expect one shows
+        "launching" until its timeout and then drops it — a launch that
+        worked, reading as one that failed."""
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        entry = self.entry().read_text()
+        self.assertIn("StartupNotify=false", entry)
+        self.assertNotIn("StartupWMClass", entry)
+
+    def test_the_launcher_script_writes_what_it_decides_to_its_log(self):
+        """A tile clicked in a grid has no terminal. The Arch box had no
+        launcher.log at all, which could not say whether the script never
+        ran or ran and had nothing to report."""
+        made, detail = native.make_launcher(self.install_dir, "desktop",
+                                            genesis_bin=str(self.genesis))
+        self.assertTrue(made, detail)
+        script = (self.install_dir / ".native" / "launcher.sh").read_text()
+        self.assertIn('exec >> "', script)
+        self.assertIn("launcher started", script)
+        self.assertIn("(exit $?)", script)
+
     def test_the_official_logo_is_the_entry_icon(self):
         """The logo is copied into the user's icon directory — so the tile
         keeps it when GENESIS is moved or re-cloned — and it wins over the
@@ -601,6 +625,77 @@ class DesktopEntryCase(unittest.TestCase):
             genesis_bin=str(self.base / "bin" / "not-there"))
         self.assertFalse(made)
         self.assertIn("no genesis", detail)
+
+
+@unittest.skipUnless(Path("/bin/bash").exists(), "the launcher is a bash script")
+class LauncherScriptBehaviourCase(unittest.TestCase):
+    """The launcher script, run — not read.
+
+    Every other launcher test asserts that text is present in the script,
+    and that is how a script that never opened a browser shipped: filling
+    in `$GENESIS` also rewrote `$GENESIS_NO_BROWSER` into a path, which is
+    never empty, so the script exited before its opener on every machine.
+    These run it, against fake curl / xdg-open / genesis on a private PATH.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+        self.log = self.base / "launcher.log"
+        self.up = self.base / "up"
+        self.tool("xdg-open", f'echo "$1" >> "{self.base}/opened"')
+        self.tool("genesis", f'echo "$@" >> "{self.base}/ran"; touch "{self.up}"')
+        self.script = self.base / "launcher.sh"
+        self.script.write_text(native.render_launcher_script(
+            str(self.bin / "genesis"), self.log, "xdg-open"), encoding="utf-8")
+        self.script.chmod(0o755)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def tool(self, name, body):
+        path = self.bin / name
+        path.write_text("#!/bin/bash\n" + body + "\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    def run_script(self, stack_up, extra_env=None):
+        """Run the launcher. `stack_up` is where the fake curl answers."""
+        self.tool("curl", "exit 0" if stack_up else
+                  f'[ -e "{self.up}" ] && exit 0 || exit 7')
+        env = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.base)}
+        env.update(extra_env or {})
+        done = subprocess.run([str(self.script)], env=env, timeout=30,
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        opened = self.base / "opened"
+        ran = self.base / "ran"
+        return (opened.read_text().split() if opened.exists() else [],
+                ran.read_text() if ran.exists() else "")
+
+    def test_a_running_stack_is_opened_and_left_alone(self):
+        opened, ran = self.run_script(stack_up=True)
+        self.assertEqual(opened, ["http://127.0.0.1:5173"])
+        self.assertEqual(ran, "")                     # nothing was converged
+
+    def test_a_cold_start_converges_the_stack_then_opens_it(self):
+        opened, ran = self.run_script(stack_up=False)
+        self.assertIn("codexify setup --with-ui", ran)
+        self.assertEqual(opened, ["http://127.0.0.1:5173"])
+
+    def test_the_callers_no_browser_switch_is_still_honoured(self):
+        """The contract the substitution broke from the other side: a test
+        run or an agent's shell says GENESIS_NO_BROWSER and gets no window."""
+        opened, _ = self.run_script(stack_up=True,
+                                    extra_env={"GENESIS_NO_BROWSER": "1"})
+        self.assertEqual(opened, [])
+
+    def test_the_log_says_what_happened(self):
+        self.run_script(stack_up=True)
+        text = self.log.read_text()
+        self.assertIn("launcher started", text)
+        self.assertIn("asked xdg-open to open the interface (exit 0)", text)
 
 
 class _FakeTTY:
