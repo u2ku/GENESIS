@@ -906,6 +906,26 @@ def _docker_ok(docker_bin: str, runner: CommandRunner,
     return True, "the daemon answers"
 
 
+def runtime_endpoint_override(install: Path) -> tuple[Optional[str], Optional[str]]:
+    """The remote runtime this machine was pointed at, and its model.
+
+    A machine whose runtime is remote — an Arch box pointing at the Mac
+    Studio's broker over the tailnet — has nothing answering on localhost
+    for the preset probe to find, so the answer lives in configuration:
+    the `.env` the installer's Whoosh'd step or the wizard's ask-once step
+    wrote, with the shell's environment winning over it, because an
+    exported `CODEXIFY_RUNTIME_ENDPOINT` is the more recent choice.
+    """
+    existing = read_env(install / ENV_FILE)
+    base = (os.environ.get("CODEXIFY_RUNTIME_ENDPOINT")
+            or os.environ.get("OPENAI_API_BASE")
+            or existing.get("CODEXIFY_RUNTIME_ENDPOINT")
+            or existing.get("OPENAI_API_BASE"))
+    model = (os.environ.get("CODEXIFY_MODEL")
+             or existing.get("CODEXIFY_MODEL"))
+    return base or None, model or None
+
+
 def readiness(install: Path, *, runner: CommandRunner = _run_command,
               http_getter: HttpGetter = _http_get,
               docker_bin: Optional[str] = None,
@@ -995,15 +1015,38 @@ def readiness(install: Path, *, runner: CommandRunner = _run_command,
         else:
             rows.append(Row("the compose file", OK, "resolves"))
 
-    preset_id, model, base = detect_runtime(http_getter)
-    if preset_id:
-        rows.append(Row("the local runtime", OK,
-                        f"{PRESETS[preset_id].display_name} at {base} "
-                        f"serving {model}"))
+    # A recorded remote runtime is the runtime: probing localhost for it
+    # would ask a machine whose runtime lives elsewhere to fail forever,
+    # no matter how healthy the stack behind that runtime is. The
+    # recorded endpoint is still asked to answer — a runtime that was
+    # written down but does not respond is a row that says so, not a
+    # row that pretends.
+    override_base, override_model = runtime_endpoint_override(install)
+    if override_base:
+        model = override_model or DEFAULT_REMOTE_RUNTIME_MODEL
+        root = override_base.rstrip("/")
+        if root.endswith("/v1"):
+            root = root[:-3]
+        status, body = http_getter(f"{root}/v1/models", 3.0)
+        if status == 200:
+            rows.append(Row("the local runtime", OK,
+                            f"the recorded runtime at {override_base} "
+                            f"serving {model}"))
+        else:
+            rows.append(Row("the local runtime", BAD,
+                            f"the recorded runtime at {override_base} "
+                            "did not answer"))
     else:
-        rows.append(Row("the local runtime", BAD,
-                        "no OpenAI-compatible runtime answered on "
-                        + ", ".join(str(PRESETS[p].base_url) for p in PRESET_ORDER)))
+        preset_id, model, base = detect_runtime(http_getter)
+        if preset_id:
+            rows.append(Row("the local runtime", OK,
+                            f"{PRESETS[preset_id].display_name} at {base} "
+                            f"serving {model}"))
+        else:
+            rows.append(Row("the local runtime", BAD,
+                            "no OpenAI-compatible runtime answered on "
+                            + ", ".join(str(PRESETS[p].base_url)
+                                        for p in PRESET_ORDER)))
 
     api_key = env.get("GUARDIAN_API_KEY", "")
 

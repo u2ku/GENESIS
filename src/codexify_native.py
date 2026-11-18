@@ -267,24 +267,11 @@ def brew_hint(missing: Iterable[str]) -> str:
     return get_service_hints(missing)
 
 
-def runtime_endpoint_override(install: Path) -> tuple[Optional[str], Optional[str]]:
-    """The remote runtime this machine was pointed at, and its model.
-
-    A machine whose runtime is remote — an Arch box pointing at the Mac
-    Studio's broker over the tailnet — has nothing answering on localhost
-    for the preset probe to find, so the answer lives in configuration:
-    the `.env` the installer's Whoosh'd step wrote, with the shell's
-    environment winning over it, because an exported
-    `CODEXIFY_RUNTIME_ENDPOINT` is the more recent choice.
-    """
-    existing = codexify.read_env(install / codexify.ENV_FILE)
-    base = (os.environ.get("CODEXIFY_RUNTIME_ENDPOINT")
-            or os.environ.get("OPENAI_API_BASE")
-            or existing.get("CODEXIFY_RUNTIME_ENDPOINT")
-            or existing.get("OPENAI_API_BASE"))
-    model = (os.environ.get("CODEXIFY_MODEL")
-             or existing.get("CODEXIFY_MODEL"))
-    return base or None, model or None
+# The recorded-runtime reader lives in codexify now — the readiness
+# ladder needed it too, and this module cannot be imported by the module
+# it imports. It is the same function; the alias keeps the native path's
+# call sites and tests unchanged.
+runtime_endpoint_override = codexify.runtime_endpoint_override
 
 
 def remote_runtime_overrides(base: str,

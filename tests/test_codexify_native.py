@@ -87,6 +87,12 @@ audioop-lts==0.2.1
 class NativeCase(unittest.TestCase):
     """A throwaway installation, with no Docker anywhere near it."""
 
+    # The operator's shell may export a runtime endpoint of its own — a
+    # machine's real choice, but not a fact these tests are about. A
+    # hermetic run reads the fixture, not the host.
+    RUNTIME_ENV_KEYS = ("CODEXIFY_RUNTIME_ENDPOINT", "OPENAI_API_BASE",
+                        "CODEXIFY_MODEL")
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
@@ -103,8 +109,17 @@ class NativeCase(unittest.TestCase):
                                                        encoding="utf-8")
         self._old_home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
+        self._saved_runtime_env = {k: os.environ.get(k)
+                                   for k in self.RUNTIME_ENV_KEYS}
+        for k in self.RUNTIME_ENV_KEYS:
+            os.environ.pop(k, None)
 
     def tearDown(self):
+        for k, v in self._saved_runtime_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         if self._old_home is None:
             os.environ.pop("HOME", None)
         else:
@@ -397,22 +412,6 @@ class _FakeTTY:
 class TestTheRemoteRuntime(NativeCase):
     """The endpoint a machine was pointed at, and the wiring that follows."""
 
-    KEYS = ("CODEXIFY_RUNTIME_ENDPOINT", "OPENAI_API_BASE", "CODEXIFY_MODEL")
-
-    def setUp(self):
-        super().setUp()
-        self._saved = {k: os.environ.get(k) for k in self.KEYS}
-        for k in self.KEYS:
-            os.environ.pop(k, None)
-
-    def tearDown(self):
-        for k, v in self._saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        super().tearDown()
-
     def test_the_shell_wins_over_the_file(self):
         """An exported endpoint is the more recent choice, and it beats the
         one the installer wrote down."""
@@ -492,6 +491,47 @@ class TestTheRemoteRuntime(NativeCase):
         written = codexify.read_env(self.install / codexify.ENV_FILE)
         self.assertEqual(written["LOCAL_BASE_URL"],
                          "http://localhost:8000/v1")
+
+    def test_readiness_honours_the_recorded_runtime(self):
+        """A machine whose runtime was written down is not asked to find
+        one on localhost — the recorded endpoint is the runtime, and it
+        is still made to answer before the row says OK."""
+        def runner(args, cwd=None, timeout=120.0, env=None):
+            import subprocess
+            return subprocess.CompletedProcess(args, 0, "ok", "")
+
+        codexify.write_env(self.install,
+                           {"CODEXIFY_RUNTIME_ENDPOINT":
+                            "http://100.71.144.117:8000/v1",
+                            "CODEXIFY_MODEL": "supergemma4-26b-uncensored"})
+        rows = codexify.readiness(self.install, runner=runner,
+                                  http_getter=self.getter,
+                                  skip_docker=True)
+        row = next(r for r in rows if r.label == "the local runtime")
+        self.assertEqual(row.mark, codexify.OK)
+        self.assertIn("the recorded runtime at "
+                      "http://100.71.144.117:8000/v1", row.detail)
+        self.assertIn("supergemma4-26b-uncensored", row.detail)
+
+    def test_a_recorded_runtime_that_does_not_answer_is_said_so(self):
+        """A written-down endpoint is a claim, and the ladder makes the
+        claim prove itself — a runtime that does not respond is a BAD
+        row, not a pretend-OK."""
+        def runner(args, cwd=None, timeout=120.0, env=None):
+            import subprocess
+            return subprocess.CompletedProcess(args, 0, "ok", "")
+
+        def silent(url, timeout=3.0):
+            return 0, ""
+
+        codexify.write_env(self.install,
+                           {"CODEXIFY_RUNTIME_ENDPOINT":
+                            "http://10.9.9.9:8000/v1"})
+        rows = codexify.readiness(self.install, runner=runner,
+                                  http_getter=silent, skip_docker=True)
+        row = next(r for r in rows if r.label == "the local runtime")
+        self.assertEqual(row.mark, codexify.BAD)
+        self.assertIn("did not answer", row.detail)
 
 
 class TestTheSystemdSupervisor(NativeCase):
