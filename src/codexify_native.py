@@ -1776,6 +1776,37 @@ def render_launcher_script(genesis_bin: str, log: Path, opener: str) -> str:
                            .replace("@OPENER@", opener))
 
 
+# What the Linux launcher opens the interface with. A Chromium-family
+# browser's --app mode is a window with no tabs and no address bar, which
+# is what an app is; it gets a profile of its own so the window is
+# Codexify's rather than one among the person's tabs, and a class of its
+# own so the dock groups it under Codexify's icon. It is started in the
+# background, because a browser window lives until it is closed and the
+# launcher must not. A machine with no such browser gets a plain tab from
+# its default one — Firefox has no app mode to ask for.
+OPEN_APP_SCRIPT = """#!/bin/bash
+url="$1"
+profile="@PROFILE@"
+for candidate in "$CODEXIFY_BROWSER" google-chrome-stable google-chrome \\
+    chromium chromium-browser brave-browser brave microsoft-edge-stable \\
+    vivaldi-stable; do
+  [ -n "$candidate" ] || continue
+  command -v "$candidate" >/dev/null 2>&1 || continue
+  echo "showing $url as an app window with $candidate"
+  "$candidate" --app="$url" --class=Codexify --user-data-dir="$profile" \\
+      --no-first-run --no-default-browser-check >/dev/null 2>&1 &
+  disown
+  exit 0
+done
+echo "no Chromium-family browser found -- showing $url in the default browser"
+exec xdg-open "$url"
+"""
+
+
+def render_open_script(profile: Path) -> str:
+    return OPEN_APP_SCRIPT.replace("@PROFILE@", str(profile))
+
+
 def make_launcher(install: Path, where: str,
                   genesis_bin: Optional[str] = None,
                   log_dir: Optional[Path] = None) -> tuple[bool, str]:
@@ -1884,14 +1915,31 @@ def _desktop_entry_text(install: Path, script: Path, icon: Optional[Path],
         lines.append("Terminal=true")
     else:
         lines.append("Terminal=false")
-    # The shell shows "launching" until a window claiming this app
-    # appears, and gives up after its own timeout. This entry opens a
-    # tab in whatever browser the person has -- a window that will never
-    # claim to be Codexify -- so the promise of one is a spinner that
-    # runs out and reads as a launch that failed.
+    # The window the opener starts is Chromium's --app mode with class
+    # Codexify, which is what lets the dock group it under this entry's
+    # icon. But the fallback is a plain tab that will never claim to be
+    # Codexify, and a shell told to expect a window shows "launching"
+    # until its timeout and reads the launch as failed -- so the shell is
+    # told not to wait, and the class still matches when there is one.
+    lines.append("StartupWMClass=Codexify")
     lines.append("StartupNotify=false")
     lines.append("X-GNOME-UsesNotifications=false")
     return "\n".join(lines) + "\n"
+
+
+def _write_executable(path: Path, text: str) -> None:
+    """Write a script atomically and make it runnable.
+
+    A temp file renamed into place: a launcher clicked mid-write gets the
+    old script or the new one, never half of either.
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False,
+                                     encoding="utf-8") as tmp:
+        tmp.write(text)
+        tmp_path = Path(tmp.name)
+    tmp_path.chmod(0o755)
+    tmp_path.replace(path)
 
 
 def _install_logo_icon(install: Path) -> Optional[Path]:
@@ -1964,18 +2012,16 @@ def _make_desktop_entry(install: Path, where: str, genesis_bin: str,
     icon = _install_logo_icon(install)
 
     import tempfile
-    # The script first: the entry is dead weight until the script exists,
-    # and a person clicking the tile between the two writes must get a
-    # working app, not a missing-file error.
+    # The scripts first: the entry is dead weight until they exist, and a
+    # person clicking the tile between the writes must get a working app,
+    # not a missing-file error. The opener goes before the launcher that
+    # names it, for the same reason.
+    opener = install / NATIVE_DIR / "open-app.sh"
     try:
-        with tempfile.NamedTemporaryFile("w", dir=script.parent,
-                                         delete=False,
-                                         encoding="utf-8") as tmp:
-            tmp.write(render_launcher_script(
-                genesis_bin, logs / "launcher.log", "xdg-open"))
-            tmp_path = Path(tmp.name)
-        tmp_path.replace(script)
-        script.chmod(0o755)
+        _write_executable(opener, render_open_script(
+            install / NATIVE_DIR / "browser-profile"))
+        _write_executable(script, render_launcher_script(
+            genesis_bin, logs / "launcher.log", str(opener)))
     except OSError as exc:
         return False, f"the launcher script could not be written: {exc}"
 

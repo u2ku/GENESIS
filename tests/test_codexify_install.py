@@ -545,17 +545,18 @@ class DesktopEntryCase(unittest.TestCase):
                              genesis_bin=str(self.genesis))
         self.assertEqual(self.installed_logo(), first)
 
-    def test_the_entry_does_not_promise_a_window_it_cannot_deliver(self):
-        """The tile opens a tab in the person's own browser, a window that
-        never claims to be Codexify. A shell told to expect one shows
-        "launching" until its timeout and then drops it — a launch that
-        worked, reading as one that failed."""
+    def test_the_entry_matches_the_app_window_but_does_not_wait_for_it(self):
+        """The opener's window has class Codexify, so the dock groups it
+        under this entry's icon. But the fallback is a plain tab that
+        never claims to be Codexify, and a shell told to wait for a window
+        shows "launching" until its timeout and then drops it — a launch
+        that worked, reading as one that failed."""
         made, detail = native.make_launcher(self.install_dir, "desktop",
                                             genesis_bin=str(self.genesis))
         self.assertTrue(made, detail)
         entry = self.entry().read_text()
+        self.assertIn("StartupWMClass=Codexify", entry)
         self.assertIn("StartupNotify=false", entry)
-        self.assertNotIn("StartupWMClass", entry)
 
     def test_the_launcher_script_writes_what_it_decides_to_its_log(self):
         """A tile clicked in a grid has no terminal. The Arch box had no
@@ -612,14 +613,16 @@ class DesktopEntryCase(unittest.TestCase):
     def test_the_entry_runs_a_script_that_converges_and_opens(self):
         """The grid tile is the Mac bundle's behaviour in Linux clothes:
         converge the stack with the interface, then open the interface —
-        xdg-open, not `open` — with the API as the fallback."""
+        through the app-window opener, not `open` — with the API as the
+        fallback."""
         made, detail = native.make_launcher(self.install_dir, "desktop",
                                             genesis_bin=str(self.genesis))
         self.assertTrue(made, detail)
         script = (self.install_dir / ".native" / "launcher.sh").read_text()
+        opener = str(self.install_dir / ".native" / "open-app.sh")
         self.assertIn("codexify setup --with-ui", script)
-        self.assertIn("xdg-open http://127.0.0.1:5173", script)
-        self.assertIn("xdg-open http://127.0.0.1:8888", script)
+        self.assertIn(opener + " http://127.0.0.1:5173", script)
+        self.assertIn(opener + " http://127.0.0.1:8888", script)
         self.assertIn("GENESIS_NO_BROWSER", script)
         entry = self.entry().read_text()
         self.assertIn("Exec=" + str(self.install_dir / ".native"
@@ -733,6 +736,102 @@ class LauncherScriptBehaviourCase(unittest.TestCase):
         text = self.log.read_text()
         self.assertIn("launcher started", text)
         self.assertIn("asked xdg-open to open the interface (exit 0)", text)
+
+
+@unittest.skipUnless(Path("/bin/bash").exists(), "the opener is a bash script")
+class AppWindowOpenerCase(unittest.TestCase):
+    """The Linux opener, run against fake browsers on a PATH of its own.
+
+    The PATH holds only the fakes, so a Chrome installed on the machine
+    running the suite cannot change what these tests find.
+    """
+
+    URL = "http://127.0.0.1:5173"
+
+    def setUp(self):
+        import time
+        self._time = time
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+        self.profile = self.base / "browser-profile"
+        self.script = self.base / "open-app.sh"
+        self.script.write_text(native.render_open_script(self.profile),
+                               encoding="utf-8")
+        self.script.chmod(0o755)
+        # The fake browsers sleep, to prove the opener does not wait on them.
+        (self.bin / "sleep").symlink_to("/bin/sleep")
+        self.tool("xdg-open", f'echo "$@" > "{self.base}/xdg-open.args"')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def tool(self, name, body):
+        path = self.bin / name
+        path.write_text("#!/bin/bash\n" + body + "\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    def browser(self, name):
+        self.tool(name, f'echo "$@" > "{self.base}/{name}.args"; sleep 3')
+
+    def run_opener(self, env=None):
+        started = self._time.monotonic()
+        done = subprocess.run([str(self.script), self.URL],
+                              env={"PATH": str(self.bin), **(env or {})},
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return self._time.monotonic() - started
+
+    def args(self, name):
+        """What a fake was started with — it writes this a moment after
+        the opener has already returned, so it is waited for."""
+        path = self.base / f"{name}.args"
+        for _ in range(40):
+            if path.exists() and path.read_text().strip():
+                return path.read_text().split()
+            self._time.sleep(0.1)
+        return None
+
+    def test_a_chromium_browser_gets_an_app_window_of_its_own(self):
+        self.browser("chromium")
+        self.run_opener()
+        args = self.args("chromium")
+        self.assertIn(f"--app={self.URL}", args)
+        # Its own class, so the dock groups it under Codexify's icon, and its
+        # own profile, so it is Codexify's window and not a tab among others.
+        self.assertIn("--class=Codexify", args)
+        self.assertIn(f"--user-data-dir={self.profile}", args)
+        self.assertFalse((self.base / "xdg-open.args").exists())
+
+    def test_the_opener_does_not_wait_for_the_window_to_close(self):
+        """A browser window lives until it is closed; the launcher must
+        not, or the tile would hang on a window it already opened."""
+        self.browser("google-chrome-stable")           # sleeps 3 seconds
+        elapsed = self.run_opener()
+        self.assertLess(elapsed, 2.0)
+        self.assertTrue(self.args("google-chrome-stable"))
+
+    def test_the_first_known_browser_wins_over_the_rest(self):
+        self.browser("google-chrome-stable")
+        self.browser("chromium")
+        self.run_opener()
+        self.assertTrue(self.args("google-chrome-stable"))
+        self.assertFalse((self.base / "chromium.args").exists())
+
+    def test_a_named_browser_overrides_the_search(self):
+        self.browser("google-chrome-stable")
+        self.browser("brave")
+        self.run_opener(env={"CODEXIFY_BROWSER": "brave"})
+        self.assertTrue(self.args("brave"))
+        self.assertFalse((self.base / "google-chrome-stable.args").exists())
+
+    def test_with_no_chromium_browser_the_default_one_gets_a_tab(self):
+        """Firefox has no app mode, so it is the fallback, not a candidate."""
+        self.browser("firefox")
+        self.run_opener()
+        self.assertEqual(self.args("xdg-open"), [self.URL])
+        self.assertFalse((self.base / "firefox.args").exists())
 
 
 class _FakeTTY:
