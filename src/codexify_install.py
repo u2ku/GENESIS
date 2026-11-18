@@ -22,6 +22,8 @@ one job. `install` ends with the code on the disk and a pointer to setup.
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -69,19 +71,57 @@ def _run_command(args: list[str], cwd: Optional[Path] = None,
     arrive — a fetch, a clone and a checkout are minutes of silence
     otherwise, and the wizard's contract is that the operator sees
     everything the machine is doing.
+
+    The child leads a process group of its own, and a timeout or a Ctrl+C
+    takes the whole group down. `git submodule update` runs `git clone`,
+    which runs `git-remote-https`; killing only the first leaves the rest
+    downloading with nothing waiting for them, so the wizard would report
+    a failure while the clone finished behind its back.
     """
     try:
-        if stream:
-            done = subprocess.run(args, cwd=str(cwd) if cwd else None,
-                                   text=True, timeout=timeout)
-            return subprocess.CompletedProcess(args, done.returncode, "", "")
-        return subprocess.run(args, cwd=str(cwd) if cwd else None,
-                               capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.Popen(
+            args, cwd=str(cwd) if cwd else None, text=True,
+            stdout=None if stream else subprocess.PIPE,
+            stderr=None if stream else subprocess.PIPE,
+            start_new_session=True)
     except FileNotFoundError:
         return subprocess.CompletedProcess(args, 127, "", "not found")
+    try:
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _kill_group(proc)
         return subprocess.CompletedProcess(
             args, 124, "", f"timed out after {int(timeout)}s")
+    except BaseException:
+        # Ctrl+C reaches the foreground group, which is no longer the
+        # child's: without this the operator stops the wizard and the
+        # clone carries on.
+        _kill_group(proc)
+        raise
+    return subprocess.CompletedProcess(args, proc.returncode,
+                                       out or "", err or "")
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Stop a child and everything it started: politely, then for certain.
+
+    The group is swept with SIGKILL after the leader has had its moment,
+    because a leader that exits on SIGTERM can leave members behind that
+    were not listening.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    proc.wait()
 
 
 def _git(runner: CommandRunner, repo: Path, *args: str,

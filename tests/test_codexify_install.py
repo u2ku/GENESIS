@@ -13,11 +13,15 @@ somewhere disposable.
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
@@ -190,6 +194,90 @@ class InstallCase(RepoCase):
         runner = self.git_ok(make_install=lambda: self.sub.mkdir(exist_ok=True))
         report = ci.install(self.repo, runner=runner)
         self.assertEqual(report.exit_code, codexify.EXIT_CONFLICT)
+
+
+class RunCommandCase(unittest.TestCase):
+    """The installer's real runner, against real child processes.
+
+    `git submodule update` runs `git clone`, which runs a transport helper.
+    A timeout that stops only the first leaves the clone downloading
+    behind a wizard that has already reported a failure — which is what
+    the Arch box showed.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @staticmethod
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def test_a_timeout_takes_the_whole_process_group_down(self):
+        pidfile = self.base / "grandchild.pid"
+        # The shell starts a long-lived child of its own, as git does.
+        script = f'sleep 30 & echo $! > "{pidfile}"; wait'
+        done = ci._run_command(["bash", "-c", script], timeout=1,
+                               stream=False)
+        grandchild = int(pidfile.read_text())
+        try:
+            self.assertEqual(done.returncode, 124)
+            for _ in range(30):                  # a killed process is reaped
+                if not self.alive(grandchild):   # by init a moment later
+                    break
+                time.sleep(0.1)
+            self.assertFalse(self.alive(grandchild),
+                             "the grandchild outlived its timed-out parent")
+        finally:
+            if self.alive(grandchild):
+                os.kill(grandchild, signal.SIGKILL)
+
+    def test_ctrl_c_takes_the_group_down_too(self):
+        """Ctrl+C goes to the foreground group, which is not the child's —
+        so the runner has to pass it on, or stopping the wizard leaves the
+        clone running."""
+        class Interrupted:
+            pid = 4242
+            returncode = None
+
+            def communicate(self, timeout=None):
+                raise KeyboardInterrupt
+
+            def wait(self, timeout=None):
+                return 0
+
+        killed = []
+        with mock.patch.object(ci.subprocess, "Popen",
+                               return_value=Interrupted()), \
+                mock.patch.object(ci.os, "killpg",
+                                  side_effect=lambda pg, sig:
+                                  killed.append((pg, sig))):
+            with self.assertRaises(KeyboardInterrupt):
+                ci._run_command(["git", "status"])
+        self.assertEqual(killed, [(4242, signal.SIGTERM),
+                                  (4242, signal.SIGKILL)])
+
+    def test_a_command_that_finishes_keeps_its_output_and_status(self):
+        done = ci._run_command(["bash", "-c", "echo hi; echo oops >&2; exit 3"],
+                               stream=False)
+        self.assertEqual((done.returncode, done.stdout, done.stderr),
+                         (3, "hi\n", "oops\n"))
+
+    def test_a_streamed_command_keeps_its_status(self):
+        done = ci._run_command(["bash", "-c", "exit 2"], stream=True)
+        self.assertEqual((done.returncode, done.stdout, done.stderr),
+                         (2, "", ""))
+
+    def test_a_missing_command_is_127(self):
+        done = ci._run_command(["no-such-command-codexify"], stream=False)
+        self.assertEqual((done.returncode, done.stderr), (127, "not found"))
 
 
 class VendoredFixCase(RepoCase):
