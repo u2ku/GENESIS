@@ -16,6 +16,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -70,16 +71,46 @@ def speak(text, voice=None):
 
     A new utterance cuts the previous one off, so typing while he talks does
     not queue stale audio behind him.
+
+    The voice comes from GENESIS's own kokoro home (built by the wizard), or
+    from Luna's wrapper where she has one — the Mac keeps borrowing hers,
+    a Linux machine stands on its own.
     """
     voice = voice or VOICE_DEFAULT[0]
-    wrapper = LUNA / "scripts" / "luna_kokoro_tts.sh"
-    if not wrapper.exists():
-        return False
-    _kill_speech()
-    out = Path(tempfile.gettempdir()) / f"genesis-{os.getpid()}.wav"
+    env = None
+    home = os.environ.get("GENESIS_KOKORO_HOME") or (
+        Path.home() / ".local" / "share" / "genesis" / "kokoro")
+    py = home / "venv" / "bin" / "python"
+    script = home / "kokoro_speak.py"
+    if script.is_file() and py.is_file() \
+            and (home / "kokoro-v1.0.onnx").is_file() \
+            and (home / "voices-v1.0.bin").is_file():
+        out = Path(tempfile.gettempdir()) / f"genesis-{os.getpid()}.wav"
+        synth = (f'"{py}" "{script}" --output "{out}" --voice "{voice}" '
+                 f'--model "{home}/kokoro-v1.0.onnx" '
+                 f'--voices "{home}/voices-v1.0.bin"')
+    else:
+        wrapper = LUNA / "scripts" / "luna_kokoro_tts.sh"
+        if not wrapper.exists():
+            return False
+        out = Path(tempfile.gettempdir()) / f"genesis-{os.getpid()}.wav"
+        synth = f'"{wrapper}" "{out}"'
+        env = dict(os.environ, LUNA_KOKORO_VOICE=voice)
+    # Playback is the one platform piece. afplay is macOS; PipeWire and
+    # PulseAudio's players cover Linux — the first one found, or none.
+    if sys.platform == "darwin":
+        play = "afplay"
+    else:
+        for p in ("pw-play", "paplay", "ffplay"):
+            if shutil.which(p):
+                play = p
+                break
+        else:
+            return False
     cmd = ["bash", "-c",
-           f'"{wrapper}" "{out}" && afplay "{out}" && rm -f "{out}"']
-    env = dict(os.environ, LUNA_KOKORO_VOICE=voice)
+           f'{synth} && {play} "{out}" && rm -f "{out}"']
+    if env is None:
+        env = os.environ
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
