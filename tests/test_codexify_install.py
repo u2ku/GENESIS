@@ -29,7 +29,7 @@ import codexify_native as native  # noqa: E402
 
 
 SUBMODULE_UPDATE = ("submodule", "update", "--init", "--recursive",
-                    "codexify-core")
+                    "--progress", "codexify-core")
 
 
 class GitAnswers:
