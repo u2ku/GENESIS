@@ -1,16 +1,5 @@
 
 
-from __future__ import annotations
-import shutil, subprocess, sys, os
-
-def get_stable_python():
-    for cand in ["python3.12", "python3.11", "python3.10", "python3"]:
-        if shutil.which(cand):
-            res = subprocess.run([cand, "--version"], capture_output=True, text=True)
-            if not any(v in res.stdout for v in ["3.14", "3.15"]):
-                return cand
-    return "python3"
-
 """CODEXIFY NATIVE — the same system, without Docker.
 
 Docker is the reference setup for Codexify, and it is a good one: twenty-two
@@ -46,6 +35,7 @@ queue, `chat_worker` is still the process that answers a message, and the
 health endpoints still decide whether any of it worked.
 """
 
+from __future__ import annotations
 
 import json
 import os
@@ -119,22 +109,6 @@ SUPERVISOR = TOOLS / "codexify_supervisor.py"
 # Codexify's floor. The container pins 3.11, and the pinned wheels are built
 # against it, so 3.11 is what the native path asks for by preference.
 PYTHON_MIN = (3, 10)
-# Prefer Python 3.12 or 3.11 over bleeding-edge 3.14 to avoid source build breakages
-def find_preferred_python() -> str:
-    for py in ["python3.12", "python3.11", "python3.10", "python3"]:
-        import shutil, subprocess
-        if shutil.which(py):
-            # Verify version isn't 3.14+
-            try:
-                res = subprocess.run([py, "--version"], capture_output=True, text=True, check=True)
-                if "3.14" not in res.stdout:
-                    return py
-            except Exception:
-                pass
-    return "python3"
-
-PYTHON_PREFERRED = find_preferred_python()
-
 PYTHON_PREFERRED = (3, 11)
 
 # The one worker that answers a message. The others serve other queues and
@@ -313,6 +287,31 @@ def tcp_open(host: str, port: int, timeout: float = 1.5) -> bool:
             return True
     except OSError:
         return False
+
+
+def get_stable_python() -> str:
+    """An interpreter name on PATH that is not the bleeding edge.
+
+    The wizard's own venv is built by `find_python`, which already prefers
+    3.12 and 3.11 over a 3.14 that source builds break on. This is the
+    same preference for the one child that is started by *name* — the
+    supervisor, which is standard-library-only but is still a process
+    somebody has to keep alive. On a rolling machine like Arch the only
+    `python3` may be the bleeding edge, and then that is what there is.
+    """
+    for candidate in ("python3.12", "python3.11", "python3.10", "python3"):
+        if not shutil.which(candidate):
+            continue
+        try:
+            done = subprocess.run([candidate, "--version"],
+                                  capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if done.returncode != 0:
+            continue
+        if not any(v in done.stdout for v in ("3.14", "3.15")):
+            return candidate
+    return "python3"
 
 
 def find_python(preferred: Optional[str] = None) -> tuple[Optional[Path], str]:
