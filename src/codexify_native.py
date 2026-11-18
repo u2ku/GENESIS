@@ -226,6 +226,7 @@ BREW_PACKAGES = {
     "redis": "redis",
     "python": "python@3.11",
     "pnpm": "pnpm",
+    "git-lfs": "git-lfs",
 }
 BREW_INSTALL = "brew install postgresql@15 redis python@3.11 pnpm"
 
@@ -264,6 +265,8 @@ def get_service_hints(missing: Iterable[str]) -> str:
             commands.append("sudo pacman -S --needed python python-pip")
         if "pnpm" in missing:
             commands.append("sudo pacman -S --needed pnpm")
+        if "git-lfs" in missing:
+            commands.append("sudo pacman -S --needed git-lfs")
         return " && ".join(commands)
 
 def brew_hint(missing: Iterable[str]) -> str:
@@ -762,8 +765,21 @@ def build_frontend(install: Path,
 
     Idempotent: an install with its `node_modules` is left alone, so a
     converged machine pays nothing but one stat.
+
+    A checkout whose package.json is still an LFS pointer file is refused
+    before pnpm runs: pnpm's parse error on the pointer ("expected value
+    at line 1 column 1") names neither the file nor git-lfs, and this
+    names both.
     """
     frontend = install / "frontend" / "src"
+    pending = codexify.lfs_pointers_pending(install)
+    if pending:
+        hint = ("git -C " + str(install) + " lfs pull"
+                + (" — after installing git-lfs: "
+                   + codexify.lfs_install_hint()
+                   if not shutil.which("git-lfs") else ""))
+        return False, (", ".join(pending) + " are pointer files — the "
+                       "checkout was made without git-lfs. Run: " + hint)
     if not (frontend / "package.json").is_file():
         return True, "there is no interface to build"
     if (frontend / "node_modules").is_dir():
@@ -1081,7 +1097,8 @@ def _linger_enabled(runner: CommandRunner) -> bool:
     """
     user = os.environ.get("USER") or ""
     done = runner(["loginctl", "show-user", user,
-                   "--property=Linger", "--value"], timeout=15.0)
+                   "--property=Linger", "--value"], timeout=15.0,
+                  stream=False)
     if done.returncode != 0:
         return True
     return (done.stdout or "").strip().lower() == "yes"
@@ -1108,7 +1125,7 @@ def _start_under_systemd(install: Path, with_ui: bool,
     for args in (["systemctl", "--user", "daemon-reload"],
                  ["systemctl", "--user", "enable", SYSTEMD_UNIT],
                  ["systemctl", "--user", "restart", SYSTEMD_UNIT]):
-        done = runner(args, cwd=install, timeout=60.0)
+        done = runner(args, cwd=install, timeout=60.0, stream=False)
         if done.returncode != 0:
             return False, (done.stderr or done.stdout or
                            f"{' '.join(args)} failed").strip()[-300:]
@@ -1117,7 +1134,8 @@ def _start_under_systemd(install: Path, with_ui: bool,
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         done = runner(["systemctl", "--user", "show", SYSTEMD_UNIT,
-                       "--property=MainPID", "--value"], timeout=15.0)
+                       "--property=MainPID", "--value"],
+                      timeout=15.0, stream=False)
         text = (done.stdout or "").strip()
         if text.isdigit() and int(text) > 0:
             pid = int(text)
@@ -1259,7 +1277,7 @@ def stop(install: Path, runner: CommandRunner = _run_command) -> tuple[bool, str
     stopped_by_systemd = False
     if _systemd_present() and _unit_path().is_file():
         done = runner(["systemctl", "--user", "stop", SYSTEMD_UNIT],
-                      timeout=120.0)
+                      timeout=120.0, stream=False)
         if done.returncode != 0:
             return False, ("the supervisor could not be stopped: "
                           "`systemctl --user stop` failed — "
@@ -1372,7 +1390,17 @@ def setup(install: Optional[Path], *, explicit: Optional[str] = None,
         real_runner = runner
 
         def runner(args, **kwargs):          # noqa: F811 — the streaming twin
-            return real_runner(args, stream=True, **kwargs)
+            # The stream flag is the wizard's, and the wizard's eye is on
+            # the minutes-long builds. It is not for everything: a call
+            # whose output is *data* — systemctl's MainPID answer, a
+            # loginctl Linger yes/no — streams its answer onto the
+            # terminal unread and returns an empty stdout, which is the
+            # wizard hearing nothing while the answer is printed on
+            # screen. Data calls say `stream=False` and are heard; build
+            # calls say nothing and are shown.
+            if kwargs.get("stream") is None:
+                kwargs["stream"] = True
+            return real_runner(args, **kwargs)
     report = Report(heading="CODEXIFY (native)")
 
     if install is None:

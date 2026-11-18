@@ -581,6 +581,20 @@ class TestTheInterfaceStep(NativeCase):
         self.assertFalse((self.install / ".env").exists())
         self.assertIn("nothing was built", report.verdict)
 
+    def test_a_pointer_file_package_json_is_refused_before_pnpm(self):
+        """The Arch box: a checkout made without git-lfs has pointer files
+        where the JSON belongs, and pnpm's parse error named neither the
+        file nor the cause. The build refuses first and names both."""
+        (self.install / "package.json").write_text(
+            "version https://git-lfs.github.com/spec/v1\n"
+            "oid sha256:b14c4db1b0a7d2ca4ac0ac10b003c48def9870\n",
+            encoding="utf-8")
+        ok, detail = native.build_frontend(self.install)
+        self.assertFalse(ok)
+        self.assertIn("pointer file", detail)
+        self.assertIn("git-lfs", detail)
+        self.assertIn("lfs pull", detail)
+
 
 class TestTheSystemdSupervisor(NativeCase):
     """Linux runs the supervisor as a user unit, and it survives logout."""
@@ -709,6 +723,49 @@ class TestTheSystemdSupervisor(NativeCase):
         stopped, detail = native.stop(self.install, runner=runner)
         self.assertFalse(stopped)
         self.assertIn("could not be stopped", detail)
+
+    def test_the_streaming_twin_does_not_swallow_the_pid_answer(self):
+        """The Arch box's false failure: the wizard's streaming twin forced
+        stream=True onto every runner call, so `systemctl show MainPID`
+        printed its answer onto the terminal — colliding with the spinner,
+        visible in the paste as a stray pid — while the wizard read an
+        empty stdout and reported a unit that 'never reported a main
+        pid'. The stack was up the whole time. A data call that says
+        stream=False is captured; a build call that says nothing streams."""
+        import subprocess
+
+        def real_runner(args, cwd=None, timeout=120.0, env=None,
+                        stream=False):
+            # The real runner's exact contract: streamed output is shown,
+            # not kept.
+            if stream:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if "show" in args:
+                return subprocess.CompletedProcess(args, 0, "172940\n", "")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        # The twin setup() builds: stream=True by default, the call's own
+        # stream=False honoured.
+        def twin(args, **kwargs):
+            if kwargs.get("stream") is None:
+                kwargs["stream"] = True
+            return real_runner(args, **kwargs)
+
+        calls = []
+        def recording_twin(args, **kwargs):
+            calls.append(kwargs.get("stream"))
+            return twin(args, **kwargs)
+
+        started, detail = native.start(
+            self.install, with_ui=True, runner=recording_twin)
+        self.assertTrue(started, detail)
+        # The pid was heard, not printed: the pid file holds it.
+        self.assertEqual(
+            (self.install / native.SUPERVISOR_PID).read_text().strip(),
+            "172940")
+        # And the data calls all said stream=False — none of them streamed.
+        self.assertTrue(calls)
+        self.assertFalse(any(flag in (True, None) for flag in calls))
 
 
 class TestTheProcesses(NativeCase):

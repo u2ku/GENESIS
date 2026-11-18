@@ -461,6 +461,54 @@ def is_install(path: Path) -> bool:
     return (path / COMPOSE_FILE).is_file() and (path / ENV_TEMPLATE).is_file()
 
 
+LFS_POINTER = "version https://git-lfs.github.com/spec/v1"
+
+# The checkout's LFS-tracked files that downstream tools parse. The
+# submodule's .gitattributes puts every *.json behind LFS, and a machine
+# without git-lfs checks the submodule out with pointer files where the
+# JSON should be — pnpm's first read of package.json then dies inside
+# serde with "expected value at line 1 column 1", a parse error that
+# names neither the file nor git-lfs. Checking the files the tools
+# actually read, not every LFS blob, keeps the probe cheap and pointed.
+LFS_PROBES = ("package.json", "frontend/src/package.json")
+
+
+def lfs_pointers_pending(install: Optional[Path]) -> list[str]:
+    """The LFS-tracked files that are still pointer files, by name.
+
+    A checkout made without git-lfs is complete-looking and broken: the
+    working tree has every file, but the LFS-tracked ones hold `version
+    https://git-lfs.github.com/spec/v1` where their content belongs.
+    Nothing downstream reports this — pip does not read these files and
+    pnpm cannot — so the probe is here, before the tools that would
+    otherwise die on it.
+    """
+    if install is None:
+        return []
+    pending = []
+    for name in LFS_PROBES:
+        path = install / name
+        try:
+            if path.is_file() and path.read_text(
+                    encoding="utf-8", errors="replace").startswith(LFS_POINTER):
+                pending.append(name)
+        except OSError:
+            continue
+    return pending
+
+
+def lfs_install_hint() -> str:
+    """The command that puts git-lfs on this machine.
+
+    The same posture as the native path's service hints: the command is
+    named, never guessed at, and running it is the operator's call — or
+    the wizard's offer, on a terminal that can answer.
+    """
+    if sys.platform == "darwin":
+        return "brew install git-lfs"
+    return "sudo pacman -S --needed git-lfs"
+
+
 def find_install(repo: Path, explicit: Optional[str] = None) -> Optional[Path]:
     """Where Codexify is.
 

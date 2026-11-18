@@ -104,6 +104,57 @@ def _status_text(done: subprocess.CompletedProcess) -> str:
             or "git said nothing")
 
 
+def _sync_lfs(runner: CommandRunner, target: Path, report: Report,
+              timeout: float) -> tuple[bool, Report]:
+    """Fetch the LFS objects the checkout is missing, if it is missing any.
+
+    A checkout made without git-lfs looks complete and is not: every
+    LFS-tracked file is its pointer text instead of its content, and the
+    first tool that parses one — pnpm on package.json — dies inside a
+    parse error that names neither file nor cause. This step is where
+    the wizard says it instead.
+
+    A machine with git-lfs and a pending pointer needs one `git lfs
+    pull` in the submodule; one without it needs the package first, and
+    gets the command named as a prerequisite. Convergence is not proof:
+    a checkout that converged its way past a git-lfs-less past takes the
+    same probe every run until the objects arrive.
+    """
+    pending = codexify.lfs_pointers_pending(target)
+    if not pending:
+        report.add("the LFS objects", OK, "already in the checkout")
+        return True, report
+    probe = runner(["git", "lfs", "version"])
+    if probe.returncode != 0:
+        report.add("the LFS objects", BAD,
+                   f"{', '.join(pending)} are pointer files — git-lfs is "
+                   f"not installed, and the checkout cannot have their "
+                   f"content without it. Run: {codexify.lfs_install_hint()}")
+        report.exit_code = EXIT_PREREQUISITE
+        report.verdict = ("the checkout's LFS objects are missing — "
+                          "nothing was installed")
+        return False, report
+    done = _git(runner, target, "lfs", "pull", timeout=timeout)
+    if done.returncode != 0:
+        report.add("the LFS objects", BAD, _status_text(done)[-300:])
+        report.exit_code = EXIT_PREREQUISITE
+        report.verdict = ("the LFS objects could not be fetched — "
+                          "nothing was installed")
+        return False, report
+    still = codexify.lfs_pointers_pending(target)
+    if still:
+        report.add("the LFS objects", BAD,
+                   f"pulled, but {', '.join(still)} are still pointer "
+                   "files — upstream may be missing the objects")
+        report.exit_code = EXIT_PREREQUISITE
+        report.verdict = ("the checkout's LFS objects are missing — "
+                          "nothing was installed")
+        return False, report
+    report.add("the LFS objects", OK,
+               f"fetched the content for {len(pending)} pointer file(s)")
+    return True, report
+
+
 def install(repo: Path, explicit: Optional[str] = None,
             runner: CommandRunner = _run_command,
             timeout: float = 300.0, stream: bool = True) -> Report:
@@ -292,7 +343,11 @@ def _latest(runner: CommandRunner, repo: Path, target: Path,
                    note)
         report.add("upstream main", OK,
                    f"also at {there_sha} — the latest already")
-        return True, report
+        # Convergence is not proof the LFS objects arrived: a checkout
+        # made before git-lfs was installed has every file and none of
+        # the contents, and it takes this branch on every run.
+        ok, report = _sync_lfs(runner, target, report, timeout)
+        return ok, report
 
     done = _git(runner, target, "checkout", there_sha, timeout=timeout,
                 stream=stream)
@@ -304,7 +359,11 @@ def _latest(runner: CommandRunner, repo: Path, target: Path,
     report.add("the move", OK, f"{here_sha} → {there_sha}")
     applied, note = apply_vendored_fixes(target)
     report.add("the vendored fixes", OK if applied else MANUAL, note)
-    return True, report
+    # The move just rewrote the working tree: whatever LFS objects the
+    # last checkout had are gone with it, so a fresh checkout needs a
+    # fresh fetch of them too.
+    ok, report = _sync_lfs(runner, target, report, timeout)
+    return ok, report
 
 
 # ------------------------------------------------------------- the fixes --
