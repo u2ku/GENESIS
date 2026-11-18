@@ -227,16 +227,14 @@ BACKENDS = {
         "auth": "x-api-key",
         "needs_shim": True,
         "shim_upstream": "http://100.71.144.117:8000/v1",
-        # No tools, measured rather than assumed: the supergemma tune on
-        # the tailnet broker answers a system-plus-tools request with
-        # pages of <|channel> markers — deterministically, per the probe
-        # (tools/luna_probe.py), so sending tools first costs a full
-        # max_tokens generation of marker spam on every turn and a second
-        # generation for the real answer. The grounding discipline still
-        # holds for the operator — /stamp, /plan, /record run the engine
-        # from the terminal — but the model on this substrate cannot call
-        # anything, and is not offered the chance to loop trying.
-        "no_tools": True,
+        # Tools, re-measured after the serving path changed: the probe
+        # (tools/luna_probe.py) showed the system-plus-tools shape
+        # answering cleanly once the broker served the tune through the
+        # registry's own resolution, where the old path collapsed into
+        # <|channel> marker pages. The marker-spam retry in talk() stays
+        # as the guard: a substrate that loops only sometimes still gets
+        # its answer, one retry without tools.
+        "no_tools": False,
     },
     # OpenAI speaks /v1/chat/completions, which is not a protocol Claude
     # Code speaks. The shim (src/shim.py) is the translation layer, so this
