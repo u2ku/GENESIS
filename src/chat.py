@@ -38,10 +38,9 @@ def _banner(style, backend: str, harness) -> str:
     codexify_note = ""
     if backend == "luna" and not harness.codexify_installed():
         codexify_note = "\n " + style.soft(harness.CODEXIFY_NOTE)
-    # The landing note, said by the chat rather than by him: a model that
-    # is told to say it will say it forever — the passage is his to open
-    # with, and the harness is what knows which turn is the first.
-    codexify_note += "\n " + style.soft(harness.LANDING_NOTE)
+    # The landing note is not printed here: the passage is too strong for
+    # the banner — the line belongs to the hint tool and the landing
+    # report, said when the moment is Luna's, not every session.
     return style.banner(
         "G E N E S I S",
         "Bootstrap Entity",
