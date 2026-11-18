@@ -927,6 +927,17 @@ def _codexify_wizard(args, ctx, codexify, explicit):
                       "no installation — stopping rather than looping.")
                 return codexify.EXIT_MISSING_INSTALL
 
+        # -- the launcher the run wants --------------------------------------
+        # Computed before the phases, because a converged machine gets
+        # its launcher too: phase 2 is skipped when the stack is already
+        # up, and a launcher step that lives inside it would never run on
+        # the very machine that needs it most — the finished one.
+        launcher = getattr(args, "launcher", None)
+        if (launcher is None
+                and not getattr(args, "no_launcher", False)):
+            launcher = "desktop"
+        launcher_reported = False
+
         # -- phase 2: the stack ----------------------------------------------
         # A --theme is a configuration change, not a missing piece: the
         # stack may be fully up, but its .env does not carry this theme,
@@ -937,10 +948,6 @@ def _codexify_wizard(args, ctx, codexify, explicit):
                 or not codexify.is_setup_done(
                     install, want_ui=_codexify_wants_ui(args))):
             print("\n  phase 2 — provisioning and starting the stack\n")
-            launcher = getattr(args, "launcher", None)
-            if (launcher is None
-                    and not getattr(args, "no_launcher", False)):
-                launcher = "desktop"
             with_ui = _codexify_wants_ui(args)
             report = codexify_native.setup(
                 install, explicit=explicit,
@@ -964,30 +971,33 @@ def _codexify_wizard(args, ctx, codexify, explicit):
                 if not _wizard_retry(report):
                     return report.exit_code
                 continue
+            launcher_reported = any(row.label == "the launcher"
+                                    for row in report.rows)
 
-            # -- phase 3: the launcher ---------------------------------------
-            if launcher and not any(
-                    row.label == "the launcher"
-                    for row in report.rows):
-                print("\n  phase 3 — the launcher\n")
-                made, detail = codexify_native.make_launcher(
-                    install, launcher)
-                # On a Mac the launcher is a bundle whose place was named;
-                # on a Linux desktop it is the app-grid entry, and the grid
-                # is the only place it goes.
-                import platform as _platform
-                place = ("Desktop" if launcher == "desktop"
-                         else "Applications folder")
-                if _platform.system() != "Darwin":
-                    place = "app grid"
-                _emit_codexify_report(ctx, codexify.Report(
-                    heading="CODEXIFY (launcher)",
-                    rows=[codexify.Row("the launcher",
-                                       codexify.OK if made
-                                       else codexify.MANUAL, detail)],
-                    verdict=("the launcher is on the " + place
-                             if made else "the launcher was not made"),
-                    exit_code=codexify.EXIT_OK))
+        # -- phase 3: the launcher -------------------------------------------
+        # Outside phase 2's if: a converged machine — the stack already
+        # up — is the machine that most needs its launcher made, and it
+        # never enters phase 2 to find it.
+        if launcher and not launcher_reported:
+            print("\n  phase 3 — the launcher\n")
+            made, detail = codexify_native.make_launcher(
+                install, launcher)
+            # On a Mac the launcher is a bundle whose place was named; on
+            # a Linux desktop it is the app-grid entry, and the grid is
+            # the only place it goes.
+            import platform as _platform
+            place = ("Desktop" if launcher == "desktop"
+                     else "Applications folder")
+            if _platform.system() != "Darwin":
+                place = "app grid"
+            _emit_codexify_report(ctx, codexify.Report(
+                heading="CODEXIFY (launcher)",
+                rows=[codexify.Row("the launcher",
+                                   codexify.OK if made
+                                   else codexify.MANUAL, detail)],
+                verdict=("the launcher is on the " + place
+                         if made else "the launcher was not made"),
+                exit_code=codexify.EXIT_OK))
 
         # -- done --------------------------------------------------------------
         print("\n  the wizard is finished — the stack is up.")

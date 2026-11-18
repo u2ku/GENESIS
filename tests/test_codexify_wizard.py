@@ -69,7 +69,7 @@ class WizardCase(unittest.TestCase):
         self.setup_done = [False]          # what is_setup_done returns
         self.install_exit = [EXIT_OK]      # the install phase's report
         self.setup_exit = [EXIT_OK]        # the setup phase's report
-        self.launcher = [None]             # what make_launcher returns
+        self.launcher = [(True, "faked")]  # what make_launcher returns
         self.installed_d = SimpleNamespace()   # no-op install object
 
         codexify = SimpleNamespace(
@@ -214,6 +214,32 @@ class TestTheFlow(WizardCase):
 
         code = self.wizard()
         self.assertEqual(code, EXIT_OK)
+        self.assertIn("launcher", self.out.getvalue())
+
+    def test_a_converged_machine_still_gets_its_launcher(self):
+        """The Arch box: the stack already up, phase 2 skipped — and the
+        launcher step nested inside phase 2 never ran. The wizard's whole
+        job on a finished machine is the missing piece, and the launcher
+        is one."""
+        self.find_install[0] = self.installed_d
+        self.setup_done[0] = True
+        self.launcher[0] = (True, "~/.local/share/applications/"
+                                 "codexify.desktop")
+        calls = []
+        sys.modules["codexify_install"].install = \
+            lambda root, explicit=None, stream=False: (
+                calls.append("install"), Report(exit_code=EXIT_OK))[-1]
+
+        def fake_setup(install, **kwargs):
+            calls.append("setup")
+            return Report(exit_code=EXIT_OK, rows=[])
+        sys.modules["codexify_native"].setup = fake_setup
+
+        code = self.wizard()
+        self.assertEqual(code, EXIT_OK)
+        # The stack was already up: neither phase ran.
+        self.assertEqual(calls, [])
+        # And the launcher was made anyway.
         self.assertIn("launcher", self.out.getvalue())
 
     def test_no_launcher_when_the_operator_said_no(self):
