@@ -1084,6 +1084,18 @@ def luna_runtime() -> tuple[str, str]:
     return ("http://100.71.144.117:8000/v1", "supergemma4-26b-uncensored")
 
 
+# The marker a model emits when its chat template collapses: harmony-style
+# channel control tokens, raw, in volume. Three occurrences is spam — one
+# can be a model quoting a marker in prose, two can be a short malformed
+# reply, but a page of them is a template that never closed.
+MARKER = "<|channel>"
+
+
+def _is_marker_spam(text: str) -> bool:
+    """Did the substrate answer with its own control markers, not words?"""
+    return text.count(MARKER) >= 3
+
+
 def backend_model(backend: str) -> str:
     """The model to ask for on this backend, as the install recorded it."""
     if backend == "luna":
@@ -1134,18 +1146,40 @@ def talk(prompt, max_turns=12, verbose=False, messages=None,
     tool_failed = False
     nudged = False
     last_text = ""
+    tools_off = False
 
     for turn in range(max_turns):
-        resp = _post({
+        payload = {
             "model": backend_model(backend),
             "max_tokens": 1200,
             "system": system_prompt(),
-            "tools": tools,
             "messages": messages,
-        }, backend)
+        }
+        if tools and not tools_off:
+            payload["tools"] = tools
+        resp = _post(payload, backend)
         content = resp.get("content", [])
         tool_uses = [c for c in content if c.get("type") == "tool_use"]
         text = "".join(c.get("text", "") for c in content if c.get("type") == "text")
+
+        # Template collapse, on the substrates that have it: a tune that
+        # cannot hold its chat template under a system message plus the
+        # tool list answers with pages of raw channel markers instead of
+        # words — the supergemma tune on the tailnet broker is the known
+        # case. The markers are the substrate saying "this request shape
+        # breaks me", so the shape is retried without tools, once, with
+        # the poisoned turn dropped from the history: a reply like that
+        # left in the transcript poisons every turn after it.
+        if _is_marker_spam(text) and not tools_off:
+            tools_off = True
+            continue
+        if _is_marker_spam(text):
+            # Even without tools it loops. Say so plainly rather than
+            # return the markers as speech.
+            return ("the substrate returned its own control markers "
+                    "instead of speech, twice — the model behind this "
+                    "backend cannot hold its template under this "
+                    "conversation. Try another backend.")
         if text.strip():
             last_text = text.strip()
 

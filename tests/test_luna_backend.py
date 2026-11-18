@@ -154,6 +154,77 @@ class TestTheShimLifecycle(unittest.TestCase):
         self.assertIsNone(harness._SHIM["proc"])
 
 
+class TestTemplateCollapse(unittest.TestCase):
+    """The supergemma tune on the tailnet broker answers a system-plus-
+    tools request with pages of `<|channel>` markers — the probe pinned it
+    (tools/luna_probe.py): bare hello ok, system alone ok, one tool ok,
+    the full list SPAM. The harness must not return the markers as
+    speech."""
+
+    SPAM = ("<|channel>thought\n<channel|>" * 20)
+    REPLY = {"content": [{"type": "text", "text": "The node is ready."}]}
+
+    def _talk(self, replies):
+        seen = []
+
+        def fake_post(payload, backend="luna"):
+            seen.append(payload)
+            return replies[min(len(seen) - 1, len(replies) - 1)]()
+
+        with unittest.mock.patch.object(harness, "_post",
+                                        side_effect=fake_post), \
+             unittest.mock.patch.object(harness, "system_prompt",
+                                        return_value="the card"), \
+             unittest.mock.patch.object(harness, "ensure_shim"):
+            out = harness.talk("Hello", backend="luna")
+        return out, seen
+
+    def test_marker_spam_is_detected(self):
+        self.assertTrue(harness._is_marker_spam(self.SPAM))
+        self.assertFalse(harness._is_marker_spam("a plain reply"))
+        self.assertFalse(harness._is_marker_spam("one <|channel> in prose"))
+        self.assertFalse(harness._is_marker_spam("a<|channel>b<|channel>c"))
+        self.assertTrue(harness._is_marker_spam("a<|channel>b<|channel>c<|channel>d"))
+
+    def test_a_spamming_substrate_is_retried_without_tools(self):
+        """The first reply loops; the same question goes back out with no
+        tools array, and the second reply is returned as speech."""
+        out, seen = self._talk([
+            lambda: {"content": [{"type": "text", "text": self.SPAM}]},
+            lambda: self.REPLY,
+        ])
+        self.assertEqual(out, "The node is ready.")
+        self.assertEqual(len(seen), 2)
+        self.assertIn("tools", seen[0])
+        self.assertNotIn("tools", seen[1])
+
+    def test_a_substrate_that_spams_without_tools_says_so(self):
+        """Both replies loop: the answer is a plain statement, not a page
+        of markers handed to the operator as Genesis's words."""
+        out, _ = self._talk([
+            lambda: {"content": [{"type": "text", "text": self.SPAM}]},
+            lambda: {"content": [{"type": "text", "text": self.SPAM}]},
+        ])
+        self.assertIn("cannot hold its template", out)
+        self.assertNotIn("<|channel>", out)
+
+    def test_the_poisoned_turn_never_enters_the_history(self):
+        """A marker page left in the transcript poisons every turn after
+        it. The retry sends the same conversation, minus nothing — the
+        spam reply was never appended."""
+        messages = []
+        out, seen = self._talk([
+            lambda: {"content": [{"type": "text", "text": self.SPAM}]},
+            lambda: self.REPLY,
+        ])
+        self.assertEqual(out, "The node is ready.")
+        # The retried request carries exactly the user's turn: the spam
+        # reply was dropped, the user message was not duplicated.
+        sent = seen[1]["messages"]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["role"], "user")
+
+
 import unittest.mock  # noqa: E402  — used above; kept at the foot with the
                        # stdlib-only posture of the rest of the suite.
 
