@@ -393,7 +393,7 @@ def native_requirements(install: Path,
             lines.append(name)
         # Filter out pyarrow on Python 3.14+ where source builds fail
     if python_version and python_version >= (3, 14):
-        lines = [r for r in lines if "pyarrow" not in r.lower()]
+        lines = [r for r in lines if not any(pkg in r.lower() for pkg in ["pyarrow", "pypika"])]
     return lines
 
 
