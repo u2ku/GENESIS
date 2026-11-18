@@ -40,7 +40,7 @@ def _banner(style, backend: str, harness) -> str:
         codexify_note = "\n " + style.soft(harness.CODEXIFY_NOTE)
     return style.banner(
         "G E N E S I S",
-        "the reality, held",
+        "Bootstrap Entity",
         f"talking on {where}  ·  ask in your own words  ·  /paste for long "
         f"text  ·  /help" + codexify_note,
     )

@@ -62,7 +62,7 @@ def landing(style, blocks: dict) -> str:
     constant = blocks.get("id", "")
     width = style.width
     out = ["", "  " + style.paint(constant.center(width - 2), term.BOLD, term.ACCENT),
-           "  " + style.soft("GENESIS · the reality, held".center(width - 2)),
+           "  " + style.soft("GENESIS · Bootstrap Entity".center(width - 2)),
            style.rule(width), ""]
     out += _fields(style, [
         ("identity", constant),
