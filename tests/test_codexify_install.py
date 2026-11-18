@@ -158,6 +158,33 @@ class InstallCase(RepoCase):
         self.assertIn("'@tailwindcss/oxide': true", text)
         self.assertIn("esbuild: true", text)
 
+    def test_every_network_step_gets_a_limit_a_slow_link_can_meet(self):
+        """The Arch box timed out of a clone that was still progressing: a
+        230 MiB download at a few hundred KiB/s is minutes, and the limit
+        was five of them. The fetch step did not even pass its timeout on,
+        so it kept git's own default."""
+        class Timed(GitAnswers):
+            timeouts = {}
+
+            def __call__(self, args, cwd=None, timeout=300.0, env=None,
+                         stream=False):
+                self.timeouts[tuple(args[3:])] = timeout
+                return super().__call__(args, cwd=cwd, timeout=timeout,
+                                        env=env, stream=stream)
+
+        plain = self.git_ok()
+        runner = Timed(plain.answers, make_install=plain.make_install)
+        report = ci.install(self.repo, runner=runner)
+        self.assertEqual(report.exit_code, codexify.EXIT_OK)
+        for step in (SUBMODULE_UPDATE,
+                     ("submodule", "foreach", "git fetch origin main")):
+            self.assertGreaterEqual(runner.timeouts[step], 3600.0, step)
+
+    def test_a_timeout_says_how_long_it_waited(self):
+        done = ci._run_command(["sleep", "5"], timeout=1, stream=False)
+        self.assertEqual(done.returncode, 124)
+        self.assertEqual(done.stderr, "timed out after 1s")
+
     def test_install_refuses_a_directory_that_is_not_codexify(self):
         """git succeeds, the directory appears, and it is not an install."""
         runner = self.git_ok(make_install=lambda: self.sub.mkdir(exist_ok=True))

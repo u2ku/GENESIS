@@ -49,6 +49,16 @@ CommandRunner = codexify_native_runner = Callable[
 SUBMODULE = "codexify-core"
 REMOTE_BRANCH = "origin/main"
 
+# How long a git step that touches the network may take. The clone is
+# hundreds of megabytes and a slow link moves it at a few hundred KiB/s,
+# so the honest time is minutes, not seconds. The old five minutes timed
+# the wizard out of a clone that was still progressing — and a killed
+# `git` leaves the `git clone` it spawned running, so the wizard reported
+# a failure while the download went on without it. The operator watches
+# the progress stream, so this is only the ceiling that lets a transfer
+# that has truly stalled end — an hour is far past any real one here.
+NETWORK_TIMEOUT = 3600.0
+
 
 def _run_command(args: list[str], cwd: Optional[Path] = None,
                  timeout: float = 300.0,
@@ -70,7 +80,8 @@ def _run_command(args: list[str], cwd: Optional[Path] = None,
     except FileNotFoundError:
         return subprocess.CompletedProcess(args, 127, "", "not found")
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(args, 124, "", "timed out")
+        return subprocess.CompletedProcess(
+            args, 124, "", f"timed out after {int(timeout)}s")
 
 
 def _git(runner: CommandRunner, repo: Path, *args: str,
@@ -157,7 +168,7 @@ def _sync_lfs(runner: CommandRunner, target: Path, report: Report,
 
 def install(repo: Path, explicit: Optional[str] = None,
             runner: CommandRunner = _run_command,
-            timeout: float = 300.0, stream: bool = True) -> Report:
+            timeout: float = NETWORK_TIMEOUT, stream: bool = True) -> Report:
     """Make the installation exist, at the latest upstream main.
 
     The rows report the steps in the order they can be wrong: is the
@@ -241,7 +252,7 @@ def install(repo: Path, explicit: Optional[str] = None,
 
 def update(repo: Path, explicit: Optional[str] = None,
            runner: CommandRunner = _run_command,
-           timeout: float = 300.0, stream: bool = False) -> Report:
+           timeout: float = NETWORK_TIMEOUT, stream: bool = False) -> Report:
     """Move an existing installation to the latest upstream main.
 
     A missing installation is an error here — `install` is the verb for a
@@ -306,7 +317,7 @@ def _latest(runner: CommandRunner, repo: Path, target: Path,
     report.add("the code", OK, f"at {here_sha}")
 
     done = _git(runner, repo, "submodule", "foreach",
-                "git fetch origin main", stream=stream)
+                "git fetch origin main", timeout=timeout, stream=stream)
     # `foreach` walks every submodule; this repo has one. If the walk
     # fails, fall back to fetching inside the submodule directly.
     if done.returncode != 0:
