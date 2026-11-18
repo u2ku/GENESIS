@@ -391,6 +391,9 @@ def native_requirements(install: Path,
         if not any(re.split(r"[=<>!~\[]", line, maxsplit=1)[0].strip().lower()
                    .replace("_", "-") == stem for line in lines):
             lines.append(name)
+        # Filter out pyarrow on Python 3.14+ where source builds fail
+    if python_version and python_version >= (3, 14):
+        lines = [r for r in lines if "pyarrow" not in r.lower()]
     return lines
 
 
