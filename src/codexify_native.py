@@ -622,7 +622,7 @@ def build_environment(install: Path, python: Optional[str] = None,
     venv_py = venv_python(install)
     if venv_py is None:
         return False, f"{venv_dir / 'bin' / 'python'} is not there"
-    runner([str(venv_py), "-m", "pip", "install", "--quiet", "--upgrade", "pip", "setuptools", "wheel", "meson-python", "ninja", "meson-python", "ninja"], cwd=install, timeout=300.0)
+    runner([str(venv_py), "-m", "pip", "install", "--quiet", "--upgrade", "pip", "setuptools", "wheel", "meson-python", "ninja", "cython"], cwd=install, timeout=300.0)
 
     requirements = native_requirements(
         install, python_version=_python_version(interpreter))
