@@ -1334,19 +1334,68 @@ def apply_plan(ctx, actions: list, manifest: dict) -> tuple:
     return applied, failed, manual, conflicted
 
 
+def _compatible_python_version(path: str) -> Optional[tuple]:
+    try:
+        done = subprocess.run(
+            [path, "-c",
+             "import sys; print(sys.version_info[0], sys.version_info[1])"],
+            capture_output=True, text=True, timeout=30)
+        a, b = done.stdout.split()
+        return int(a), int(b)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def _kokoro_venv_builder() -> tuple[Optional[str], str]:
+    """How to build the voice's venv: an interpreter, or uv's name.
+
+    kokoro-onnx declares Requires-Python <3.14 and a rolling Arch ships
+    only the bleeding edge, so the builder asks the question find_python
+    asks the codexify wizard: an older interpreter first, and uv — which
+    fetches its own managed 3.13, no source build, no AUR — as the
+    rolling-release answer. None of them is a manual step, said plainly.
+    """
+    env = os.environ.get("GENESIS_KOKORO_PYTHON")
+    if env:
+        if os.path.isfile(env) and os.access(env, os.X_OK):
+            return env, ""
+        return None, f"GENESIS_KOKORO_PYTHON is not executable: {env}"
+    for name in ("python3.13", "python3.12", "python3.11"):
+        path = shutil.which(name)
+        if not path:
+            continue
+        version = _compatible_python_version(path)
+        if version and (3, 10) <= version < (3, 14):
+            return path, ""
+    if shutil.which("uv"):
+        # uv venv --python 3.13 resolves a managed 3.13, downloading
+        # one if the machine has none — the pacman-packaged way to have
+        # an older Python without an AUR source build.
+        return "uv", ""
+    return None, ("no python between 3.10 and 3.14 for the voice — "
+                  "sudo pacman -S uv lets the wizard manage one")
+
+
 def _install_kokoro_venv() -> tuple:
     """Build the venv and pip-install the pinned kokoro-onnx into it."""
     home = kokoro_home()
     venv = home / "venv"
+    builder, why_not = _kokoro_venv_builder()
+    if not builder:
+        return False, why_not
     bar = _Progress(f"build {venv.name} + pip install {KOKORO_PIP_PIN}")
-    ticker = threading.Thread(
-        target=_tick_until, args=(bar,), daemon=True)
+    ticker = threading.Thread(target=_tick_until, args=(bar,), daemon=True)
     try:
         venv.mkdir(parents=True, exist_ok=True)
         ticker.start()
-        result = subprocess.run(
-            [sys.executable, "-m", "venv", str(venv)],
-            capture_output=True, text=True, timeout=300)
+        if builder == "uv":
+            result = subprocess.run(
+                ["uv", "venv", "--python", "3.13", "--seed", str(venv)],
+                capture_output=True, text=True, timeout=600)
+        else:
+            result = subprocess.run(
+                [builder, "-m", "venv", str(venv)],
+                capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
             return False, f"venv creation failed: {result.stderr.strip()[:200]}"
         pip = venv / "bin" / "pip"

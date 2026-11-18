@@ -102,6 +102,16 @@ class TestTheVenv(VoiceFixture):
     """The venv build, driven with fakes — a NameError here shipped once
     because no test ever reached this code."""
 
+    def build_with_fakes(self, run_side_effect):
+        with unittest.mock.patch.object(bootstrap.subprocess, "run",
+                                        side_effect=run_side_effect), \
+             unittest.mock.patch.object(
+                 bootstrap, "_kokoro_venv_builder",
+                 return_value=("/usr/bin/python3.13", "")), \
+             unittest.mock.patch.object(bootstrap, "_venv_has_kokoro",
+                                        return_value=True):
+            return bootstrap._install_kokoro_venv()
+
     def test_the_build_runs_to_success(self):
         home = bootstrap.kokoro_home()
         home.mkdir(parents=True)
@@ -114,11 +124,7 @@ class TestTheVenv(VoiceFixture):
                 (home / "venv" / "bin" / "pip").write_text("#!/bin/sh\n")
             return unittest.mock.Mock(returncode=0, stderr="", stdout="")
 
-        with unittest.mock.patch.object(bootstrap.subprocess, "run",
-                                        side_effect=fake_run), \
-             unittest.mock.patch.object(bootstrap, "_venv_has_kokoro",
-                                        return_value=True):
-            ok, detail = bootstrap._install_kokoro_venv()
+        ok, detail = self.build_with_fakes(fake_run)
         self.assertTrue(ok, detail)
         self.assertEqual(len(ran), 2)  # the venv, then the pip install
         self.assertIn("kokoro-onnx>=0.5.0,<1.0", " ".join(ran[1]))
@@ -135,11 +141,56 @@ class TestTheVenv(VoiceFixture):
             return unittest.mock.Mock(returncode=1, stderr="boom",
                                       stdout="")
 
-        with unittest.mock.patch.object(bootstrap.subprocess, "run",
-                                        side_effect=fake_run):
-            ok, detail = bootstrap._install_kokoro_venv()
+        ok, detail = self.build_with_fakes(fake_run)
         self.assertFalse(ok)
         self.assertIn("pip install failed", detail)
+
+    def test_uv_is_the_rolling_release_answer(self):
+        """A machine with only a too-new python builds through uv, which
+        manages its own 3.13 — no AUR source build, no system downgrade."""
+        home = bootstrap.kokoro_home()
+        home.mkdir(parents=True)
+        ran = []
+
+        def fake_run(cmd, **kwargs):
+            ran.append(cmd)
+            if cmd[:2] == ["uv", "venv"]:
+                (home / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+                (home / "venv" / "bin" / "pip").write_text("#!/bin/sh\n")
+                return unittest.mock.Mock(returncode=0, stderr="", stdout="")
+            return unittest.mock.Mock(returncode=0, stderr="", stdout="")
+
+        with unittest.mock.patch.object(bootstrap.subprocess, "run",
+                                        side_effect=fake_run), \
+             unittest.mock.patch.object(
+                 bootstrap, "_kokoro_venv_builder", return_value=("uv", "")), \
+             unittest.mock.patch.object(bootstrap, "_venv_has_kokoro",
+                                        return_value=True):
+            ok, detail = bootstrap._install_kokoro_venv()
+        self.assertTrue(ok, detail)
+        self.assertEqual(ran[0][:3], ["uv", "venv", "--python"])
+        self.assertIn("3.13", ran[0])
+
+    def test_no_compatible_python_names_the_manual_step(self):
+        with unittest.mock.patch.object(
+                bootstrap, "_kokoro_venv_builder",
+                return_value=(None, "no python between 3.10 and 3.14")):
+            ok, detail = bootstrap._install_kokoro_venv()
+        self.assertFalse(ok)
+        self.assertIn("3.10 and 3.14", detail)
+
+    def test_the_builder_prefers_an_older_interpreter_when_there_is_one(self):
+        """python3.13 on PATH wins before uv is even considered."""
+        with unittest.mock.patch.object(
+                bootstrap.shutil, "which",
+                side_effect=lambda n: "/usr/bin/python3.13"
+                if n == "python3.13" else (None if n.startswith("python3") else "/usr/bin/uv")), \
+             unittest.mock.patch.object(
+                 bootstrap, "_compatible_python_version",
+                 return_value=(3, 13)):
+            builder, why_not = bootstrap._kokoro_venv_builder()
+        self.assertEqual(builder, "/usr/bin/python3.13")
+        self.assertEqual(why_not, "")
 
 
 class TestTheDownloads(VoiceFixture):
