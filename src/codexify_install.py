@@ -280,6 +280,16 @@ def _latest(runner: CommandRunner, repo: Path, target: Path,
     there_sha = (there.stdout or "").strip()
 
     if here_sha == there_sha:
+        # A checkout that did not move still needs its fixes. The fixes
+        # are applied after a move, so an install whose latest came in
+        # before a fix existed — upstream did not change, the fix did —
+        # is a checkout that has converged its way past ever applying it.
+        # The pnpm-workspace placeholders are the proof this matters: a
+        # machine that fetched its submodule before that fix was written
+        # takes this branch on every run forever, and never gets it.
+        applied, note = apply_vendored_fixes(target)
+        report.add("the vendored fixes", OK if applied else MANUAL,
+                   note)
         report.add("upstream main", OK,
                    f"also at {there_sha} — the latest already")
         return True, report

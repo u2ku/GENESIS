@@ -142,6 +142,22 @@ class InstallCase(RepoCase):
         self.assertEqual(report.exit_code, codexify.EXIT_OK)
         self.assertFalse(any("→" in row.detail for row in report.rows))
 
+    def test_convergence_still_applies_the_vendored_fixes(self):
+        """The Arch box: a submodule that fetched upstream *before* a fix
+        existed converges on every run — and the early return meant it
+        never applied it. A converged checkout with a pending fix must
+        still get the fix, not the green row."""
+        self.make_install()
+        (self.sub / "pnpm-workspace.yaml").write_text(
+            "allowBuilds:\n"
+            "  '@tailwindcss/oxide': set this to true or false\n"
+            "  esbuild: set this to true or false\n", encoding="utf-8")
+        report = ci.update(self.repo, runner=self.git_ok())
+        self.assertEqual(report.exit_code, codexify.EXIT_OK)
+        text = (self.sub / "pnpm-workspace.yaml").read_text()
+        self.assertIn("'@tailwindcss/oxide': true", text)
+        self.assertIn("esbuild: true", text)
+
     def test_install_refuses_a_directory_that_is_not_codexify(self):
         """git succeeds, the directory appears, and it is not an install."""
         runner = self.git_ok(make_install=lambda: self.sub.mkdir(exist_ok=True))
