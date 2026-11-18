@@ -1,4 +1,6 @@
 
+
+from __future__ import annotations
 import shutil, subprocess, sys, os
 
 def get_stable_python():
@@ -9,8 +11,6 @@ def get_stable_python():
                 return cand
     return "python3"
 
-
-from __future__ import annotations
 """CODEXIFY NATIVE — the same system, without Docker.
 
 Docker is the reference setup for Codexify, and it is a good one: twenty-two
