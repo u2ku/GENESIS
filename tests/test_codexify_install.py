@@ -545,6 +545,17 @@ class DesktopEntryCase(unittest.TestCase):
                              genesis_bin=str(self.genesis))
         self.assertEqual(self.installed_logo(), first)
 
+    def test_the_opener_exists_without_a_launcher_having_been_made(self):
+        """The wizard opens the app before — or without — the tile, since
+        --no-launcher is a choice, so the opener cannot be the launcher's
+        by-product."""
+        opener = native.ensure_app_opener(self.install_dir)
+        self.assertEqual(opener, self.install_dir / ".native" / "open-app.sh")
+        self.assertTrue(opener.stat().st_mode & 0o100)       # runnable
+        self.assertIn(str(self.install_dir / ".native" / "browser-profile"),
+                      opener.read_text())
+        self.assertFalse(self.entry().exists())              # no tile made
+
     def test_the_entry_matches_the_app_window_but_does_not_wait_for_it(self):
         """The opener's window has class Codexify, so the dock groups it
         under this entry's icon. But the fallback is a plain tab that

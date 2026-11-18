@@ -846,8 +846,28 @@ def _emit_codexify_report(ctx, report):
                                report.verdict, report.exit_code))
 
 
-def _open_codexify(with_ui: bool):
-    """Open Codexify in the default browser, once it is up.
+def _app_window_opener(install):
+    """The opener that shows Codexify as an app window, or None.
+
+    On Linux the app grid's tile opens the interface as a browser app
+    window — no tabs, no address bar, a class and profile of its own. The
+    wizard's last act is the first time anyone sees the app, so it opens
+    the same window the tile will, not a tab the tile never opens. A Mac,
+    a machine where the opener cannot be written, and anything that does
+    not know how to make one all get None, and the plain opener.
+    """
+    if install is None or not sys.platform.startswith("linux"):
+        return None
+    try:
+        import codexify_native
+        ensure = getattr(codexify_native, "ensure_app_opener", None)
+        return ensure(install) if ensure else None
+    except Exception:
+        return None
+
+
+def _open_codexify(with_ui: bool, install=None):
+    """Open Codexify once it is up — as an app window where there is one.
 
     The wizard's last act: the stack was just proven by a probe that got
     an answer, so opening is honest. The interface is opened with
@@ -875,6 +895,19 @@ def _open_codexify(with_ui: bool):
             print(f"  it is running at {url} — the browser is not opened "
                   "(this run is not on a terminal).")
             return
+    # The window the tile opens, where this machine has one to open. Its
+    # opener falls back to the default browser by itself when there is no
+    # Chromium-family browser, so this path never opens less than the
+    # plain one would.
+    app_opener = _app_window_opener(install) if with_ui else None
+    if app_opener:
+        try:
+            subprocess.Popen([str(app_opener), url], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            print(f"  opened {url} as an app window")
+            return
+        except OSError:
+            pass                       # fall through to the plain opener
     opener = shutil.which("open") or shutil.which("xdg-open")
     if not opener:
         print(f"  it is running at {url} — open that in a browser.")
@@ -1001,7 +1034,7 @@ def _codexify_wizard(args, ctx, codexify, explicit):
 
         # -- done --------------------------------------------------------------
         print("\n  the wizard is finished — the stack is up.")
-        _open_codexify(_codexify_wants_ui(args))
+        _open_codexify(_codexify_wants_ui(args), install)
         return codexify.EXIT_OK
 
     print("  the wizard ran out of passes — something is not converging.")

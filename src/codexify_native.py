@@ -1807,6 +1807,25 @@ def render_open_script(profile: Path) -> str:
     return OPEN_APP_SCRIPT.replace("@PROFILE@", str(profile))
 
 
+def ensure_app_opener(install: Path) -> Optional[Path]:
+    """The app-window opener for this install, written if it is not there.
+
+    The tile and the wizard's own last step open the interface the same
+    way, so there is one opener and both ask for it here — the wizard
+    cannot rely on the launcher having been made, because `--no-launcher`
+    is a choice. Rewritten on every call: it is a few lines, and a stale
+    copy would be an opener that disagrees with the code that wrote it.
+    """
+    opener = install / NATIVE_DIR / "open-app.sh"
+    try:
+        opener.parent.mkdir(parents=True, exist_ok=True)
+        _write_executable(opener, render_open_script(
+            install / NATIVE_DIR / "browser-profile"))
+    except OSError:
+        return None
+    return opener
+
+
 def make_launcher(install: Path, where: str,
                   genesis_bin: Optional[str] = None,
                   log_dir: Optional[Path] = None) -> tuple[bool, str]:
@@ -2016,10 +2035,10 @@ def _make_desktop_entry(install: Path, where: str, genesis_bin: str,
     # person clicking the tile between the writes must get a working app,
     # not a missing-file error. The opener goes before the launcher that
     # names it, for the same reason.
-    opener = install / NATIVE_DIR / "open-app.sh"
+    opener = ensure_app_opener(install)
+    if opener is None:
+        return False, "the app-window opener could not be written"
     try:
-        _write_executable(opener, render_open_script(
-            install / NATIVE_DIR / "browser-profile"))
         _write_executable(script, render_launcher_script(
             genesis_bin, logs / "launcher.log", str(opener)))
     except OSError as exc:

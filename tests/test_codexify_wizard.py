@@ -359,6 +359,57 @@ class TestTheFinish(WizardCase):
         self.assertEqual(self.opened,
                          [["/usr/bin/open", "http://127.0.0.1:5173"]])
 
+    def finish_on(self, platform, ensure_returns, with_ui=True):
+        """Run a finished-machine wizard on `platform`, with a fake native
+        module whose ensure_app_opener answers `ensure_returns`."""
+        self.find_install[0] = self.installed_d
+        self.setup_done[0] = True
+        ensure = mock.Mock(return_value=ensure_returns)
+        sys.modules["codexify_native"].ensure_app_opener = ensure
+        args = SimpleNamespace(python=None, preset=None, model=None,
+                               allow_cloud=False, with_ui=with_ui,
+                               dry_run=False, launcher=None,
+                               no_launcher=False, wizard=True,
+                               codexify=None)
+        ctx = SimpleNamespace(style=term.make_style(plain=True))
+        with mock.patch.object(cli_module.sys, "platform", platform):
+            with mock.patch.object(cli_module, "emit",
+                                   side_effect=lambda t: None):
+                with mock.patch("sys.stdout", io.StringIO()):
+                    code = cli_module._codexify_wizard(
+                        args, ctx, sys.modules["codexify"], None)
+        self.assertEqual(code, EXIT_OK)
+        return ensure
+
+    def test_on_linux_the_first_open_is_the_app_window_the_tile_opens(self):
+        """The wizard's last act is the first time anyone sees the app.
+        It opened a browser tab the tile never opens; it now opens the
+        same app window, through the same opener."""
+        ensure = self.finish_on("linux", Path("/tmp/open-app.sh"))
+        self.assertEqual(self.opened,
+                         [["/tmp/open-app.sh", "http://127.0.0.1:5173"]])
+        ensure.assert_called_once_with(self.installed_d)
+
+    def test_an_api_only_run_is_not_given_an_app_window(self):
+        """Port 8888 is a JSON endpoint; a window shaped like an app for
+        it would be a window with nothing in it to use."""
+        ensure = self.finish_on("linux", Path("/tmp/open-app.sh"),
+                                with_ui=False)
+        self.assertEqual(self.opened,
+                         [["/usr/bin/open", "http://127.0.0.1:8888"]])
+        ensure.assert_not_called()
+
+    def test_a_linux_machine_that_cannot_write_the_opener_still_opens(self):
+        self.finish_on("linux", None)
+        self.assertEqual(self.opened,
+                         [["/usr/bin/open", "http://127.0.0.1:5173"]])
+
+    def test_a_mac_keeps_its_plain_opener(self):
+        ensure = self.finish_on("darwin", Path("/tmp/open-app.sh"))
+        self.assertEqual(self.opened,
+                         [["/usr/bin/open", "http://127.0.0.1:5173"]])
+        ensure.assert_not_called()
+
     def test_no_opener_means_the_url_is_printed(self):
         self.find_install[0] = self.installed_d
         self.setup_done[0] = True
