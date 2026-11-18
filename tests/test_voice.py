@@ -84,18 +84,24 @@ class TestThePlan(VoiceFixture):
                    for a in bootstrap._voice_actions(self.context())}
         self.assertEqual(effects["kokoro-model"], "install")
 
-    def test_no_voice_opt_out_is_a_silent_probe_not_a_secret(self):
+    def test_the_voice_is_default_and_opting_out_is_named(self):
+        """He is built unless --no-voice says otherwise, and opting out
+        is a probe in the plan — the silence is a visible choice."""
         ctx = self.context()
+        actions = bootstrap.build_plan(ctx, {"supported": True})
+        ids = {a["id"] for a in actions}
+        self.assertIn("kokoro-script", ids)
+        self.assertIn("kokoro-model", ids)
+
         ctx.no_voice = True
         actions = bootstrap.build_plan(ctx, {"supported": True})
-        probes = [a for a in actions if a["id"] == "kokoro-voice"]
-        self.assertEqual(len(probes), 1)
-        self.assertEqual(probes[0]["effect"], "none")
-        self.assertIn("--no-voice", probes[0].get("note", ""))
-        # and none of the real voice actions ride along
+        ids = {a["id"] for a in actions}
         real = {"kokoro-script", "kokoro-venv", "kokoro-model",
                 "kokoro-voices"}
-        self.assertFalse(real & {a["id"] for a in actions})
+        self.assertFalse(real & ids)
+        probes = [a for a in actions if a["id"] == "kokoro-voice"]
+        self.assertEqual(len(probes), 1)
+        self.assertIn("--no-voice", probes[0].get("note", ""))
 
 
 class TestTheVenv(VoiceFixture):

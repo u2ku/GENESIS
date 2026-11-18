@@ -457,15 +457,14 @@ def build_plan(ctx, profile: dict) -> list:
             {"present": path.is_dir()},
             "none" if path.is_dir() else "create"))
 
-    # -- the voice. The standard tier, not the wizard's: a machine with
-    #    no gateway key is still a machine that speaks. Kokoro needs no
-    #    credential, and the wizard's one prompt is a key prompt.
+    # -- the voice. Default: a GENESIS node speaks. The British man is
+    #    part of what the machine is, so the ladder builds him unless
+    #    --no-voice says otherwise — and opting out is named in the
+    #    plan, so the silence is a choice the operator can see.
     if ctx.no_voice:
-        # Same honesty rule as Codexify: opting out is a choice, but a
-        # machine that cannot speak should not pass silently either way.
         actions.append(_action(
             "kokoro-voice", "probe", "voice",
-            {"configured": True}, {"configured": False}, "none",
+            {"configured": False}, {"configured": False}, "none",
             note="skipped by --no-voice; he stays silent on this machine"))
     else:
         actions.extend(_voice_actions(ctx))
@@ -1334,6 +1333,15 @@ def apply_plan(ctx, actions: list, manifest: dict) -> tuple:
     return applied, failed, manual, conflicted
 
 
+def _tail(text: str, limit: int = 300) -> str:
+    """The end of an error, not its beginning — a progress banner
+    (mise, pip, uv) owns the top of the buffer; the sentence that
+    says what actually failed owns the bottom."""
+    stripped = (text or "").strip().replace("\r", "\n")
+    lines = [line for line in stripped.split("\n") if line.strip()]
+    return " ".join(lines)[-limit:] or "(no output)"
+
+
 def _compatible_python_version(path: str) -> Optional[tuple]:
     try:
         done = subprocess.run(
@@ -1397,7 +1405,8 @@ def _install_kokoro_venv() -> tuple:
                 [builder, "-m", "venv", str(venv)],
                 capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            return False, f"venv creation failed: {result.stderr.strip()[:200]}"
+            return False, ("venv creation failed: "
+                           + _tail(result.stderr))
         pip = venv / "bin" / "pip"
         if not pip.is_file():
             return False, "the venv has no pip — python3-venv may be missing"
@@ -1405,7 +1414,8 @@ def _install_kokoro_venv() -> tuple:
             [str(pip), "install", "--quiet", KOKORO_PIP_PIN],
             capture_output=True, text=True, timeout=1800)
         if result.returncode != 0:
-            return False, f"pip install failed: {result.stderr.strip()[:200]}"
+            return False, ("pip install failed: "
+                           + _tail(result.stderr))
     except OSError as exc:
         return False, f"{type(exc).__name__}: {exc}"
     except subprocess.TimeoutExpired:

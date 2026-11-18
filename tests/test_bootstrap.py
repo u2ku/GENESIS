@@ -76,11 +76,11 @@ class LadderCase(unittest.TestCase):
     def run_bootstrap(self, *args) -> tuple:
         """Run the bootstrap, and return (exit code, output).
 
-        The voice is off for every run this case makes: the ladder tests
-        assert on their own tree, and the voice's real actions build a
-        venv and download a model — network work no hermetic test owes.
-        The voice has its own case, its own file, and its own opt-out
-        test that proves --no-voice keeps it out.
+        The voice is default now, so the ladder tests opt out centrally:
+        they assert on their own tree, and the voice's real actions build
+        a venv and download a model — network work no hermetic test
+        owes. The voice has its own case, its own file, and its own
+        test that proves the default and the opt-out.
         """
         args = tuple(a for a in args if a != "--no-voice") + ("--no-voice",)
         buffer = io.StringIO()
