@@ -1,4 +1,15 @@
 
+import shutil, subprocess, sys, os
+
+def get_stable_python():
+    for cand in ["python3.12", "python3.11", "python3.10", "python3"]:
+        if shutil.which(cand):
+            res = subprocess.run([cand, "--version"], capture_output=True, text=True)
+            if not any(v in res.stdout for v in ["3.14", "3.15"]):
+                return cand
+    return "python3"
+
+
 from __future__ import annotations
 """CODEXIFY NATIVE — the same system, without Docker.
 
@@ -966,7 +977,7 @@ def start(install: Path, with_ui: bool = False,
         except OSError:
             pass
 
-    args = [sys.executable, str(SUPERVISOR), "--install", str(install)]
+    args = [get_stable_python(), str(SUPERVISOR), "--install", str(install)]
     if with_ui:
         args.append("--with-ui")
     env = dict(os.environ)
