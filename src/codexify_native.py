@@ -626,7 +626,7 @@ def build_environment(install: Path, python: Optional[str] = None,
 
     venv_env = os.environ.copy()
     venv_env["PATH"] = f"{venv_dir / 'bin'}{os.pathsep}{venv_env.get('PATH', '')}"
-    venv_env["CFLAGS"] = "-Wno-error=incompatible-pointer-types -Wno-error=incompatible-function-pointer-types"
+    venv_env["CFLAGS"] = "-Wno-error=incompatible-pointer-types"
 
     boot = runner([str(venv_py), "-m", "pip", "install", "--quiet", "--upgrade",
                    "pip", "setuptools", "wheel", "meson-python", "ninja", "cython"],
